@@ -832,7 +832,7 @@ pub(crate) fn builtin_noeq_sym_names(builtin: &str) -> Vec<&'static str> {
 /// one allocation per distinct `[AC]` symbol name.  Equality on the variant is
 /// by string VALUE (`str: PartialEq`), so entries interned here compare equal
 /// to ones other crates intern for the same name.
-fn intern_ac_name(name: &str) -> &'static str {
+pub(crate) fn intern_ac_name(name: &str) -> &'static str {
     use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
     static INTERNED: OnceLock<Mutex<BTreeSet<&'static str>>> = OnceLock::new();

@@ -97,6 +97,8 @@ pub mod rule_restriction;
 pub mod sapic;
 pub mod signature;
 pub mod state_trace;
+#[cfg(feature = "serde")]
+pub mod system_codec;
 pub mod system_import;
 pub mod tactic;
 #[cfg(test)]

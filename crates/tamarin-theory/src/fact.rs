@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tamarin_term::lterm::{HasFrees, LNTerm, LVar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Multiplicity {
     Persistent,
     Linear,
@@ -37,6 +38,7 @@ pub enum FactTag {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FactAnnotation {
     SolveFirst,
     SolveLast,
@@ -639,6 +641,99 @@ pub fn lvar_to_lnterm(v: &LVar) -> LNTerm {
         *v
     };
     tamarin_term::vterm::var_term(v)
+}
+
+/// Hand-written serde for `FactTag` (interned name in `Proto`), the same way
+/// as `tamarin_term::lterm`'s `serde_impl`, and for `Fact`, which writes only
+/// `tag`, `annotations` and `terms` and is rebuilt with
+/// `Fact::fresh_annotated`, which recomputes `bloom`/`max_var`.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::{Fact, FactAnnotation, FactTag, Multiplicity};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeSet;
+    use tamarin_term::intern::intern_str;
+    use tamarin_term::lterm::HasFrees;
+
+    #[derive(Serialize, Deserialize)]
+    enum FactTagWire<N> {
+        Proto(Multiplicity, N, usize),
+        Fresh,
+        Out,
+        In,
+        Ku,
+        Kd,
+        Ded,
+        Term,
+    }
+
+    impl Serialize for FactTag {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let w = match *self {
+                FactTag::Proto(m, n, a) => FactTagWire::Proto(m, n, a),
+                FactTag::Fresh => FactTagWire::Fresh,
+                FactTag::Out => FactTagWire::Out,
+                FactTag::In => FactTagWire::In,
+                FactTag::Ku => FactTagWire::Ku,
+                FactTag::Kd => FactTagWire::Kd,
+                FactTag::Ded => FactTagWire::Ded,
+                FactTag::Term => FactTagWire::Term,
+            };
+            w.serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for FactTag {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(match FactTagWire::<String>::deserialize(d)? {
+                FactTagWire::Proto(m, n, a) => FactTag::Proto(m, intern_str(&n), a),
+                FactTagWire::Fresh => FactTag::Fresh,
+                FactTagWire::Out => FactTag::Out,
+                FactTagWire::In => FactTag::In,
+                FactTagWire::Ku => FactTag::Ku,
+                FactTagWire::Kd => FactTag::Kd,
+                FactTagWire::Ded => FactTag::Ded,
+                FactTagWire::Term => FactTag::Term,
+            })
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct FactWire<A, Ts> {
+        tag: FactTag,
+        annotations: A,
+        terms: Ts,
+    }
+
+    impl<T: Serialize> Serialize for Fact<T> {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let Fact {
+                tag,
+                annotations,
+                terms,
+                // Caches over `terms`, recomputed on read.
+                bloom: _,
+                max_var: _,
+            } = self;
+            FactWire {
+                tag: *tag,
+                annotations,
+                terms: &terms[..],
+            }
+            .serialize(s)
+        }
+    }
+
+    impl<'de, T: Deserialize<'de> + HasFrees> Deserialize<'de> for Fact<T> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let FactWire {
+                tag,
+                annotations,
+                terms,
+            } = FactWire::<BTreeSet<FactAnnotation>, Vec<T>>::deserialize(d)?;
+            Ok(Fact::fresh_annotated(tag, annotations, terms))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ pub enum DiffType {
 /// `vec.into()` (or `Arc::from(vec)`); destructure-and-consume patterns
 /// use `args.iter().cloned()` (each child clone is itself O(1)).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Term<A> {
     Lit(A),
     App(FunSym, Arc<[Term<A>]>),

@@ -37,6 +37,7 @@ pub type NodeConc = (NodeId, ConcIdx);
 /// An edge in the derivation graph — a conclusion of one rule
 /// instance feeding a premise of another.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge {
     pub src: NodeConc,
     pub tgt: NodePrem,
@@ -47,6 +48,7 @@ pub struct Edge {
 /// least-important matches the Haskell enumeration so any tie-breaks
 /// during pretty-printing produce the same output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Reason {
     Formula,
     InjectiveFacts,
@@ -73,6 +75,7 @@ impl std::fmt::Display for Reason {
 /// Equality and ordering ignore the reason tag — two atoms are "the
 /// same" iff they constrain the same pair, mirroring Haskell.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LessAtom {
     pub smaller: NodeId,
     pub larger: NodeId,
@@ -131,6 +134,7 @@ pub use crate::tools::equation_store::SplitId;
 
 /// A finite disjunction. Mirrors Haskell's `Logic.Connectives.Disj`.
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Disj<T>(pub Vec<T>);
 
 impl<T> Disj<T> {
@@ -145,6 +149,7 @@ impl<T> Disj<T> {
 
 /// A `Goal` denotes that a constraint reduction rule is applicable.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Goal {
     /// An action that must exist in the trace.
     Action(LVar, LNFact),

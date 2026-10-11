@@ -22,6 +22,12 @@ use crate::vterm::{Lit, VTerm};
 // Resp_1 variant `c1 = aenc(x, pk(~lkR))` comes before the trivial
 // one, giving `split_case_1` = the meaningful variant).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// The `BTreeMap` key needs `Ord` to be read back; serde's inferred bound omits it.
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "C: serde::Deserialize<'de>, V: serde::Deserialize<'de> + Ord"))
+)]
 pub struct SubstVFresh<C, V> {
     map: BTreeMap<V, VTerm<C, V>>,
 }

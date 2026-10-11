@@ -266,6 +266,7 @@ pub fn dbg_impure_range_vars(s: &SubstVFresh<Name, LVar>, live: &BTreeSet<LVar>)
 
 /// Index of a disjunction in the equation store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SplitId(pub i64);
 
 impl SplitId {
@@ -294,6 +295,7 @@ fn without_key(s: &LNSubstVFresh, v: &LVar) -> Vec<(LVar, LNTerm)> {
 /// One entry in the disjunctive part of the store: a `SplitId`
 /// alongside the set of substitutions making up that disjunction.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EqDisj {
     pub split_id: SplitId,
     pub substs: Vec<LNSubstVFresh>,
@@ -339,6 +341,7 @@ pub(crate) fn ordered_substs(substs: &[LNSubstVFresh]) -> Vec<&LNSubstVFresh> {
 /// `EqStore`. Mirrors Haskell's `EqStore { _eqsSubst, _eqsConj,
 /// _eqsNextSplitId }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EquationStore {
     /// "Free" substitution — currently-fixed bindings of the global
     /// variables. Composes with everything else.

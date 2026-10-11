@@ -9,6 +9,7 @@
 //! `Fractional`/`RealFrac`.
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rgb {
     pub r: f64,
     pub g: f64,

@@ -540,6 +540,7 @@ pub struct Fact {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FactAnnotation {
     SolveFirst,
     SolveLast,
@@ -646,6 +647,7 @@ impl BinOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VarSpec {
     pub name: String,
     pub idx: u64,
@@ -654,6 +656,7 @@ pub struct VarSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SortHint {
     Msg,
     Pub,   // $x
@@ -668,6 +671,7 @@ pub enum SortHint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SuffixSort {
     Msg,
     Pub,
@@ -686,6 +690,53 @@ pub enum FlagFormula {
     Not(Box<FlagFormula>),
     And(Box<FlagFormula>, Box<FlagFormula>),
     Or(Box<FlagFormula>, Box<FlagFormula>),
+}
+
+/// Hand-written serde for `BinOp` (interned name in `AcFct`), the same way as
+/// `tamarin_term::lterm`'s `serde_impl`.  The name is re-interned in the
+/// parser's own pool.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::BinOp;
+    use crate::parser::intern_ac_name;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    enum BinOpWire<N> {
+        Exp,
+        Mult,
+        Union,
+        Xor,
+        NatPlus,
+        AcFct(N),
+    }
+
+    impl Serialize for BinOp {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let w = match *self {
+                BinOp::Exp => BinOpWire::Exp,
+                BinOp::Mult => BinOpWire::Mult,
+                BinOp::Union => BinOpWire::Union,
+                BinOp::Xor => BinOpWire::Xor,
+                BinOp::NatPlus => BinOpWire::NatPlus,
+                BinOp::AcFct(n) => BinOpWire::AcFct(n),
+            };
+            w.serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for BinOp {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(match BinOpWire::<String>::deserialize(d)? {
+                BinOpWire::Exp => BinOp::Exp,
+                BinOpWire::Mult => BinOp::Mult,
+                BinOpWire::Union => BinOp::Union,
+                BinOpWire::Xor => BinOp::Xor,
+                BinOpWire::NatPlus => BinOp::NatPlus,
+                BinOpWire::AcFct(n) => BinOp::AcFct(intern_ac_name(&n)),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

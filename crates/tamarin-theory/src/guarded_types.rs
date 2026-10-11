@@ -22,6 +22,7 @@ use tamarin_utils::cow::cow_map_arc;
 /// `Bound(n)` is a DeBruijn index; `n=0` refers to the innermost enclosing
 /// binder. `Free(v)` is an unbound LVar (kept with full `VarSpec` info).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BVar {
     Bound(u32),
     Free(p::VarSpec),
@@ -33,6 +34,7 @@ pub enum BVar {
 /// determines its DeBruijn index. We keep `name` for display/parsing but
 /// the binding's identity is purely positional.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GBinding {
     pub name: String,
     pub sort: p::SortHint,
@@ -47,6 +49,7 @@ pub struct GBinding {
 // compares — the consistency (equal values ⇒ equal hashes) the implied-
 // formula dedup's hash prefilter relies on (see `fx_hash_one`).
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GTerm {
     Var(BVar),
     PubLit(String),
@@ -97,6 +100,7 @@ pub(crate) fn cow_pair_arc(
 
 /// Mirrors HS `Fact (VTerm c (BVar v))`.
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GFact {
     pub persistent: bool,
     pub name: String,
@@ -108,6 +112,7 @@ pub struct GFact {
 ///
 /// Same variant set as `p::Atom`, but terms are `GTerm`.
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GAtom {
     Eq(GTerm, GTerm),
     Less(GTerm, GTerm),

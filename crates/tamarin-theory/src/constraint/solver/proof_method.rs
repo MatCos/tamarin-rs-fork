@@ -32,6 +32,7 @@ pub type CaseName = String;
 
 /// Outcome of a finished proof method.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Result {
     /// A dependency graph was found that satisfies the system.
     Solved,
@@ -44,6 +45,7 @@ pub enum Result {
 
 /// One small-step transformation of a sequent.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ProofMethod {
     Sorry(Option<String>),
     Simplify,

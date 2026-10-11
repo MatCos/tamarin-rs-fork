@@ -11,6 +11,7 @@ use crate::term::{lit, Term, TermView};
 
 /// Literal: either a constant `Con(c)` or a variable `Var(v)`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Lit<C, V> {
     Con(C),
     Var(V),

@@ -28,6 +28,7 @@ use crate::constraint::system::{NodeRuleMap, System};
 /// Reasons why a `System` is contradictory. Variants match Haskell
 /// 1-to-1 so downstream pretty printers can reuse the names.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Contradiction {
     /// The `<` order has a cycle.
     Cyclic,

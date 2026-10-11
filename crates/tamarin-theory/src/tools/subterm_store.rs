@@ -22,6 +22,7 @@ use tamarin_utils::FastSet;
 
 /// One stored subterm constraint: `small ⊏ big`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SubtermConstraint {
     pub small: LNTerm,
     pub big: LNTerm,
@@ -39,6 +40,7 @@ pub struct SubtermConstraint {
 /// slice `Deref`.  Derives mirror `SubtermStore`'s so it slots into the derived
 /// impls (order-sensitive `PartialEq` is exact because the set is always sorted).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SortedPairSet {
     inner: Vec<(LNTerm, LNTerm)>,
 }
@@ -102,6 +104,7 @@ impl<'a> IntoIterator for &'a SortedPairSet {
 ///   negSubterms / posSubterms / solvedSubterms / isContradictory /
 ///   oldNegSubterms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SubtermStore {
     pub subterms: Vec<SubtermConstraint>,
     pub solved_subterms: Vec<SubtermConstraint>,

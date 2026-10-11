@@ -10,6 +10,11 @@ description = "Term language for the Tamarin prover (Rust port)."
 [dependencies]
 itertools = "0.15.0"
 tamarin-utils = { workspace = true }
+# Optional: derives for the RL server's system codec (feature `serde`).
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+
+[features]
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

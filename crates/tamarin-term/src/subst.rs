@@ -24,6 +24,12 @@ use crate::vterm::{Lit, VTerm};
 /// `VTerm<C, V>`. The Haskell newtype is kept transparent here — callers
 /// usually want to inspect or build the mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// The `BTreeMap` key needs `Ord` to be read back; serde's inferred bound omits it.
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "C: serde::Deserialize<'de>, V: serde::Deserialize<'de> + Ord"))
+)]
 pub struct Subst<C, V> {
     map: BTreeMap<V, VTerm<C, V>>,
 }

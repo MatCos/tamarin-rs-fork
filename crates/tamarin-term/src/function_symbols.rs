@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 
 /// A function symbol can be either private (unknown to the adversary) or public.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Privacy {
     Private,
     Public,
@@ -24,6 +25,7 @@ pub enum Privacy {
 /// A function symbol can be a constructor or a destructor (which only
 /// applies if it reduces).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Constructability {
     Constructor,
     Destructor,
@@ -44,6 +46,7 @@ pub enum AcState {
 /// `IsNDC | NotNDC | IsNDCDiff | IsNDCBoth` (FunctionSymbols.hs:125) — the
 /// derived `Ord` participates in symbol ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NdcState {
     IsNdc,
     NotNdc,
@@ -366,6 +369,7 @@ pub fn show_acfct_sym(sym: &AcFctSym) -> String {
 /// Variant order mirrors the Haskell declaration
 /// `Union | Mult | Xor | NatPlus | ACfct ACfctSym` (FunctionSymbols.hs:138).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AcSym {
     Union,
     Mult,
@@ -376,6 +380,7 @@ pub enum AcSym {
 
 /// Commutative (but not associative) function symbols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CSym {
     EMap,
 }
@@ -398,6 +403,7 @@ impl UserDefinedSym {
 
 /// Top-level function-symbol classification.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FunSym {
     NoEq(NoEqSym),
     Ac(AcSym),
@@ -611,6 +617,106 @@ pub fn nat_fun_sig() -> FunSig {
     [FunSym::NoEq(nat_one_sym()), FunSym::Ac(AcSym::NatPlus)]
         .into_iter()
         .collect()
+}
+
+/// Hand-written serde for `NoEqSym` and `AcFctSym` (interned name), the same
+/// way as `lterm.rs`'s `serde_impl`.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::{AcFctSym, Constructability, NdcState, NoEqSym, Privacy};
+    use crate::intern::intern_bytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct NoEqSymWire<N> {
+        name: N,
+        arity: usize,
+        privacy: Privacy,
+        constructability: Constructability,
+        ndc: NdcState,
+    }
+
+    impl Serialize for NoEqSym {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let NoEqSym {
+                name,
+                arity,
+                privacy,
+                constructability,
+                ndc,
+            } = *self;
+            NoEqSymWire {
+                name,
+                arity,
+                privacy,
+                constructability,
+                ndc,
+            }
+            .serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for NoEqSym {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let NoEqSymWire {
+                name,
+                arity,
+                privacy,
+                constructability,
+                ndc,
+            } = NoEqSymWire::<Vec<u8>>::deserialize(d)?;
+            Ok(NoEqSym {
+                name: intern_bytes(&name),
+                arity,
+                privacy,
+                constructability,
+                ndc,
+            })
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct AcFctSymWire<N> {
+        name: N,
+        privacy: Privacy,
+        constructability: Constructability,
+        ndc: NdcState,
+    }
+
+    impl Serialize for AcFctSym {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let AcFctSym {
+                name,
+                privacy,
+                constructability,
+                ndc,
+            } = *self;
+            AcFctSymWire {
+                name,
+                privacy,
+                constructability,
+                ndc,
+            }
+            .serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for AcFctSym {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let AcFctSymWire {
+                name,
+                privacy,
+                constructability,
+                ndc,
+            } = AcFctSymWire::<Vec<u8>>::deserialize(d)?;
+            Ok(AcFctSym {
+                name: intern_bytes(&name),
+                privacy,
+                constructability,
+                ndc,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

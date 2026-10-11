@@ -83,6 +83,7 @@ pub type LessIndex =
 /// Whether a system arose from raw or refined source-traces. Mirrors
 /// Haskell's `SourceKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SourceKind {
     RawSources,
     RefinedSources,
@@ -90,6 +91,7 @@ pub enum SourceKind {
 
 /// Whether the system tracks the LHS or RHS of a diff theory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Side {
     LHS,
     RHS,
@@ -122,6 +124,11 @@ pub enum Side {
 /// `Debug`/`PartialEq` are implemented manually, delegating to the inner
 /// `Arc`, so `SystemContent`'s derived `Debug`/`PartialEq` behave exactly as
 /// they would over a bare `Arc<EquationStore>` field.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(transparent)
+)]
 pub struct SealedEqStore(Arc<EquationStore>);
 
 impl std::ops::Deref for SealedEqStore {
@@ -174,6 +181,7 @@ impl PartialEq for SealedEqStore {
 // default `Arc`).  `Debug`/`PartialEq` are still derived (the wrapper provides
 // both, delegating to the inner `Arc`).
 #[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SystemContent {
     /// Node id → rule instance providing its conclusion.
     ///
@@ -627,6 +635,7 @@ pub fn canonical_goal_for_dedup(g: &Goal) -> std::borrow::Cow<'_, Goal> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GoalStatus {
     /// Whether the goal is currently "loop-marked".
     pub looping: bool,
@@ -1853,6 +1862,85 @@ pub fn formula_to_system(
     // Safety restrictions are added as known-true lemmas.
     sys.insert_lemmas(safety);
     sys
+}
+
+/// Serde for `System` (the RL server's system codec): it writes its six value
+/// fields and none of the caches/stamps, the same split
+/// `impl PartialEq for System` makes.  Reading takes the caches and fresh
+/// stamps from `System::empty`, so `decode(encode(sys)) == sys`.  Writing
+/// destructures every field, so a new field is a compile error here.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::{Guarded, System, SystemContent};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    /// The written fields of `System`, generic over the three non-`Copy` ones
+    /// so writing borrows and reading owns.
+    #[derive(Serialize, Deserialize)]
+    struct SystemWire<C, U, L> {
+        content: C,
+        source_kind: Option<super::SourceKind>,
+        side: Option<super::Side>,
+        next_goal_nr: u64,
+        used_sources: U,
+        sources_lemma_universals: L,
+    }
+
+    impl Serialize for System {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let System {
+                content,
+                source_kind,
+                side,
+                next_goal_nr,
+                used_sources,
+                sources_lemma_universals,
+                // Caches and stamps: not part of the value (see
+                // `impl PartialEq for System`), rebuilt on read.
+                max_var_idx_cache: _,
+                node_max_cache: _,
+                content_stamp: _,
+                subst_stamp: _,
+                subst_applied_marker: _,
+                formulas_stamp: _,
+                solved_formulas_stamp: _,
+                formulas_canon_cache: _,
+                solved_formulas_canon_cache: _,
+            } = self;
+            SystemWire {
+                content,
+                source_kind: *source_kind,
+                side: *side,
+                next_goal_nr: *next_goal_nr,
+                used_sources,
+                sources_lemma_universals,
+            }
+            .serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for System {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let SystemWire {
+                content,
+                source_kind,
+                side,
+                next_goal_nr,
+                used_sources,
+                sources_lemma_universals,
+            } = SystemWire::<SystemContent, Vec<String>, Vec<Arc<Guarded>>>::deserialize(d)?;
+            Ok(System {
+                content,
+                source_kind,
+                side,
+                next_goal_nr,
+                used_sources,
+                sources_lemma_universals,
+                ..System::empty()
+            })
+        }
+    }
 }
 
 #[cfg(test)]

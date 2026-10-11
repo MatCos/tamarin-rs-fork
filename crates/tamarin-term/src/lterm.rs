@@ -33,6 +33,7 @@ use tamarin_utils::cow::cow_map_vec;
 /// `LSortFresh < LSortMsg`, `LSortPub < LSortMsg`, `LSortNat < LSortMsg`.
 /// `LSortNode` is incomparable to the others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LSort {
     Pub,
     Fresh,
@@ -101,6 +102,7 @@ impl NameId {
 /// the short constant it substitutes for a long term; it never occurs in a
 /// parsed or solved term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NameTag {
     Fresh,
     Pub,
@@ -110,6 +112,7 @@ pub enum NameTag {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Name {
     pub tag: NameTag,
     pub id: NameId,
@@ -841,6 +844,58 @@ pub(crate) fn nat_to_fresh_vars(t: LNTerm) -> LNTerm {
         Term::App(f, args) => {
             let mapped: Vec<LNTerm> = args.iter().cloned().map(nat_to_fresh_vars).collect();
             Term::App(f, mapped.into())
+        }
+    }
+}
+
+/// Hand-written serde for `NameId` and `LVar`, which hold an interned name.
+/// serde's derive treats a `&str` field as borrowed from the input, which
+/// would make the impl `Deserialize<'static>` only, so reading goes through a
+/// mirror with an owned `String` and re-interns it.  Writing goes through the
+/// same mirror by exhaustive destructuring, so a new field is a compile error
+/// here rather than a silent change of the encoding.  The other types with an
+/// interned name do the same.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::{LSort, LVar, NameId};
+    use crate::intern::intern_str;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    impl Serialize for NameId {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let NameId(name) = *self;
+            name.serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for NameId {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(NameId(intern_str(&String::deserialize(d)?)))
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct LVarWire<N> {
+        name: N,
+        sort: LSort,
+        idx: u64,
+    }
+
+    impl Serialize for LVar {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let LVar { name, sort, idx } = *self;
+            LVarWire { name, sort, idx }.serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for LVar {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let LVarWire { name, sort, idx } = LVarWire::<String>::deserialize(d)?;
+            Ok(LVar {
+                name: intern_str(&name),
+                sort,
+                idx,
+            })
         }
     }
 }

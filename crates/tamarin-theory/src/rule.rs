@@ -34,6 +34,7 @@ use crate::sapic::PlainProcess;
 /// `LNTerm`. `new_vars` initially holds the new (fresh) variables and is
 /// then refined to their concrete instantiations.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rule<I> {
     pub info: I,
     pub premises: Vec<LNFact>,
@@ -203,9 +204,11 @@ pub(crate) fn apply_subst_rule<I: Clone>(
 // =============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PremIdx(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConcIdx(pub usize);
 
 /// Position of a term inside a rule: `(premise, fact-arg-index, term-position)`.
@@ -229,6 +232,7 @@ pub fn print_fact_position(ep: &ExtendedPosition) -> String {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RuleInfo<P, I> {
     Proto(P),
     Intr(I),
@@ -251,10 +255,12 @@ impl<P, I> RuleInfo<P, I> {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RuleAttributes {
     /// Color for graphical display.
     pub color: Option<Rgb>,
     /// Source process — for SAPIC-derived rules.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub process: Option<PlainProcess>,
     pub ignore_deriv_checks: bool,
     pub is_sapic_rule: bool,
@@ -332,6 +338,7 @@ pub struct ProtoRuleACInfo {
 
 /// Information for instances of protocol rules modulo AC.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProtoRuleACInstInfo {
     pub name: ProtoRuleName,
     pub attributes: RuleAttributes,
@@ -343,6 +350,7 @@ pub struct ProtoRuleACInstInfo {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IntrRuleACInfo {
     /// HS `ConstrRule BC.ByteString FunSym` (Theory/Model/Rule.hs:540); `fun`
     /// is the
@@ -947,6 +955,40 @@ pub fn unifiable_rule_ac_insts(
         return Ok(true);
     }
     maude.unifiable(&eqs)
+}
+
+/// Hand-written serde for `ProtoRuleName` (interned name in `Stand`), the same
+/// way as `tamarin_term::lterm`'s `serde_impl`.
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::ProtoRuleName;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use tamarin_term::intern::intern_str;
+
+    #[derive(Serialize, Deserialize)]
+    enum ProtoRuleNameWire<N> {
+        Fresh,
+        Stand(N),
+    }
+
+    impl Serialize for ProtoRuleName {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let w = match *self {
+                ProtoRuleName::Fresh => ProtoRuleNameWire::Fresh,
+                ProtoRuleName::Stand(n) => ProtoRuleNameWire::Stand(n),
+            };
+            w.serialize(s)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ProtoRuleName {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(match ProtoRuleNameWire::<String>::deserialize(d)? {
+                ProtoRuleNameWire::Fresh => ProtoRuleName::Fresh,
+                ProtoRuleNameWire::Stand(n) => ProtoRuleName::Stand(intern_str(&n)),
+            })
+        }
+    }
 }
 
 // =============================================================================

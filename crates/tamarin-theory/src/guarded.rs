@@ -37,6 +37,7 @@ pub use crate::guarded_types::{
 // =============================================================================
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Quant {
     All,
     Ex,
@@ -677,6 +678,7 @@ pub fn cmp_fact(a: &GFact, b: &GFact) -> std::cmp::Ordering {
 /// `Hash` is derived alongside the derived `PartialEq` (equal values hash
 /// equal), enabling the implied-formula dedup's `fx_hash_one` prefilter.
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Guarded {
     /// One atomic predicate (may contain Bound vars only when nested under
     /// a sufficient number of `GGuarded` binders).

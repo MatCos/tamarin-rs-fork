@@ -18,6 +18,23 @@ indexmap = { workspace = true }
 fancy-regex = "0.18"
 # `Theory.Constraint.System.JSON` (lib/theory's aeson dependency upstream).
 serde_json = "1"
+# Optional: the RL server's system codec (`system_codec`, feature `serde`):
+# serde derives, encoded as postcard, then gzip, then base64url.
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
+flate2 = { version = "1", optional = true }
+base64 = { workspace = true, optional = true }
+
+[features]
+serde = [
+    "dep:serde",
+    "dep:postcard",
+    "dep:flate2",
+    "dep:base64",
+    "tamarin-utils/serde",
+    "tamarin-term/serde",
+    "tamarin-parser/serde",
+]
 
 [dev-dependencies]
 walkdir = "2"
