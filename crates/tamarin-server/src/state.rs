@@ -304,6 +304,7 @@ impl TheoryStore {
             &parser_theory,
             &cfg.maude_path,
             cfg.stop_on_trace,
+            &cfg.heuristic,
             &in_file,
             ndc_cache.as_ref(),
         )?);

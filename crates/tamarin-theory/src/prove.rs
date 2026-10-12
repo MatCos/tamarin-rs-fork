@@ -350,7 +350,7 @@ pub struct CliHeuristic {
 ///      relative (unlike the in-file heuristic).
 ///   5. `setQuitOnEmpty` (Theory/Proof.hs:709-716) — `--oracle-only` sets
 ///      `quitOnEmpty` on every oracle / tactic ranking.
-fn resolve_cli_heuristic(
+pub fn resolve_cli_heuristic(
     cli: &CliHeuristic,
     in_file: &str,
     tactics: &[crate::tactic::Tactic],

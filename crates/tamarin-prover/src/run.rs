@@ -421,6 +421,15 @@ fn run_interactive(args: &Args) -> Result<i32, RunError> {
     // CLI `--stop-on-trace` — merged with each theory's `configuration:`
     // block at load time (`ProofState::new`), HS `closeTheory` precedence.
     cfg.stop_on_trace = cli_cut(args);
+    // `--heuristic` / `--oraclename` / `--oracle-only` — HS `withWebUI` gets
+    // `constructAutoProver thyLoadOptions` (Interactive.hs:118); its heuristic
+    // overrides every lemma's (`selectHeuristic`, Web/Handler.hs:766), as on
+    // the batch path (`cli_heuristic`).
+    cfg.heuristic = tamarin_theory::prove::CliHeuristic {
+        raw: args.heuristic.clone(),
+        oracle_name: args.oracle_name.clone(),
+        oracle_only: args.oracle_only,
+    };
     // `--with-dot` / `--with-json` — HS stores `readOutputCommand as`
     // (Environment.hs:41-45) as `WebUI.outputCmd` (Interactive.hs:138,
     // Web/Types.hs:152); the graph route then spawns `ocGraphCommand` —

@@ -69,10 +69,9 @@ pub struct LemmaProofState {
 ///   - `use_induction`: `UseInduction` iff the lemma carries `[use_induction]`
 ///     or `[sources]` (`prove_lemma`'s `force_induction` check); else the
 ///     `AvoidInduction` default.
-///   - `heuristic`: per-lemma `[heuristic=..]` > theory-level `heuristic:`
-///     directive, parsed via `parse_heuristic_str_with_tactics`
-///     (prove.rs's `resolve_heuristic`, minus the CLI `--heuristic` the web
-///     path never has).
+///   - `heuristic`: CLI `--heuristic` > per-lemma `[heuristic=..]` >
+///     theory-level `heuristic:` directive, parsed via
+///     `parse_heuristic_str_with_tactics` (prove.rs's `resolve_heuristic`).
 ///     `None` ⇒ HS default `Smart`.
 ///
 /// Built ONCE in [`ProofState::new`] and never mutated → held lock-free
@@ -142,6 +141,7 @@ impl ProofState {
         parser_theory: &tamarin_parser::ast::Theory,
         maude_path: &str,
         cli_cut: Option<tamarin_theory::constraint::solver::context::CutStrategy>,
+        cli_heuristic: &tamarin_theory::prove::CliHeuristic,
         in_file: &str,
         ndc_cache: Option<&tamarin_theory::constraint::solver::context::IntrRuleCache>,
     ) -> Result<Self, String> {
@@ -174,6 +174,9 @@ impl ProofState {
         // (`hs_take_directory(in_file)` in prove.rs), both in the session
         // built below and in raw-solve replay rankings.
         typed.in_file = in_file.to_string();
+        // Reject a `--heuristic` HS would refuse, as `--prove` does, instead
+        // of silently ranking with the smart fallback.
+        tamarin_theory::prove::validate_cli_heuristic(cli_heuristic, &typed.tactic)?;
         let sig = typed.signature.maude_sig.clone();
         let maude =
             MaudeHandle::start(maude_path, sig).map_err(|e| format!("maude start: {:?}", e))?;
@@ -242,7 +245,7 @@ impl ProofState {
                 maude.clone(),
                 None,
                 &typed.in_file,
-                tamarin_theory::prove::CliHeuristic::default(),
+                cli_heuristic.clone(),
                 cut,
                 ndc_cache,
             ) {
@@ -309,6 +312,11 @@ impl ProofState {
         // applicable methods (mirrors `prove::prove_lemma` heuristic/
         // use_induction resolution).  Built once, read lock-free thereafter.
         let mut lemma_settings: BTreeMap<String, LemmaSearchSettings> = BTreeMap::new();
+        let cli_rankings = tamarin_theory::prove::resolve_cli_heuristic(
+            cli_heuristic,
+            &typed.in_file,
+            &typed.tactic,
+        );
         for lemma in typed.lemmas() {
             let lname = lemma.name.clone();
             // --- Per-lemma search settings (see `LemmaSearchSettings`) ------
@@ -322,9 +330,8 @@ impl ProofState {
             } else {
                 UseInduction::AvoidInduction
             };
-            // `heuristic`: per-lemma `[heuristic=..]` > theory `heuristic:`.
-            // There is no CLI `--heuristic` on the web path, so the CLI
-            // override branch of `prove::prove_lemma` is skipped entirely.
+            // `heuristic`: CLI `--heuristic` > per-lemma `[heuristic=..]` >
+            // theory `heuristic:` (prove.rs `resolve_heuristic`).
             let lemma_heuristic: Option<&str> = lemma.attributes.iter().find_map(|a| match a {
                 LemmaAttr::Heuristic(s) => Some(s.as_str()),
                 _ => None,
@@ -333,7 +340,7 @@ impl ProofState {
                 Some(h) => Some(h.to_string()),
                 None => typed.heuristic.first().cloned(),
             };
-            let heuristic = heuristic_raw.map(|h| {
+            let in_file_heuristic = heuristic_raw.map(|h| {
                 let mut rankings =
                     tamarin_theory::constraint::solver::goals::parse_heuristic_str_with_tactics(
                         &h,
@@ -351,6 +358,7 @@ impl ProofState {
                 );
                 rankings
             });
+            let heuristic = cli_rankings.clone().or(in_file_heuristic);
             lemma_settings.insert(
                 lname.clone(),
                 LemmaSearchSettings {
@@ -1350,7 +1358,7 @@ lemma trivial: exists-trace
 end
 "#;
         let pt = tamarin_parser::parse_theory(src, &[]).expect("parse");
-        ProofState::new(&pt, mp, None, "", None).expect("build state")
+        ProofState::new(&pt, mp, None, &Default::default(), "", None).expect("build state")
     }
 
     #[test]
@@ -1364,6 +1372,53 @@ end
         let root = state.get_root("trivial").expect("trivial root");
         assert!(matches!(root.method, ProofMethod::Sorry(_)));
         assert!(matches!(root.status, NodeStatus::Open));
+    }
+
+    /// A CLI `--heuristic` overrides the lemma's `[heuristic=..]` (HS
+    /// `selectHeuristic`); without it the lemma's own heuristic stays; a
+    /// ranking HS refuses is an error.
+    #[test]
+    fn cli_heuristic_overrides_lemma_heuristic() {
+        let mp = match maude_path() {
+            Some(p) => p,
+            None => return,
+        };
+        let src = r#"
+theory T begin
+rule Setup: [Fr(~k)] --[Setup(~k)]-> [Out(~k)]
+lemma trivial [heuristic=S]: exists-trace
+  "Ex k #i. Setup(k) @ #i"
+end
+"#;
+        let pt = tamarin_parser::parse_theory(src, &[]).expect("parse");
+        let ranking = |raw: Option<&str>| {
+            let cli = tamarin_theory::prove::CliHeuristic {
+                raw: raw.map(str::to_string),
+                ..Default::default()
+            };
+            let state = ProofState::new(&pt, &mp, None, &cli, "", None).expect("build state");
+            state.lemma_settings["trivial"].heuristic.clone()
+        };
+        let parsed = |h: &str| {
+            Some(
+                tamarin_theory::constraint::solver::goals::parse_heuristic_str_with_tactics(
+                    h,
+                    "",
+                    &[],
+                ),
+            )
+        };
+        assert_eq!(ranking(None), parsed("S"));
+        assert_eq!(ranking(Some("C")), parsed("C"));
+        assert_ne!(parsed("C"), parsed("S"));
+        let cli = tamarin_theory::prove::CliHeuristic {
+            raw: Some("x".to_string()),
+            ..Default::default()
+        };
+        let err = ProofState::new(&pt, &mp, None, &cli, "", None)
+            .err()
+            .expect("rejected");
+        assert!(err.contains("--heuristic"), "{err}");
     }
 
     #[test]

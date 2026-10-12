@@ -101,6 +101,10 @@ pub struct ServerConfig {
     /// (`imgThyPath` → `renderGraphCode`, Web/Theory.hs:1404-1412, 1484-1491).
     /// `None` = flag absent, the `dot` pipeline above.
     pub json_path: Option<String>,
+    /// CLI `--heuristic` / `--oraclename` / `--oracle-only` (all absent by
+    /// default).  As in HS, a given `--heuristic` overrides every lemma's
+    /// and theory's heuristic, for autoprove and for the ranked method list.
+    pub heuristic: tamarin_theory::prove::CliHeuristic,
 }
 
 impl ServerConfig {
@@ -114,6 +118,7 @@ impl ServerConfig {
             stop_on_trace: None,
             dot_path: "dot".to_string(),
             json_path: None,
+            heuristic: Default::default(),
         }
     }
 }
