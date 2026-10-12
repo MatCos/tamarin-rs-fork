@@ -19,6 +19,8 @@
 //! AST and the post-elaboration `LNTerm` are different types.
 
 use tamarin_parser::ast as p;
+use tamarin_term::lterm::LSort;
+use tamarin_term::pretty::TermStyle;
 use tamarin_utils::fresh::PreciseFreshState;
 
 use crate::guarded::{Guarded, Quant};
@@ -140,10 +142,7 @@ pub fn formula_doublequoted_nested(f: &p::Formula, nest_n: usize) -> String {
 /// `freshIdent` per name — producing `.<idx>` suffixes when the source
 /// name is already in scope.
 pub fn pretty_guarded(g: &Guarded) -> String {
-    let mut s = String::new();
-    let mut state = avoid_precise_guarded(g);
-    pp_guarded(g, &mut state, &mut s);
-    s
+    pretty_guarded_styled(g, &FormulaStyle::TAMARIN)
 }
 
 /// Test-only: pretty-print a guarded formula with HS-style
@@ -1922,12 +1921,74 @@ fn binop_symbol(op: p::BinOp) -> &'static str {
     }
 }
 
+/// [`binop_symbol`] with the builtin AC separators taken from `style`.
+fn binop_symbol_styled(op: p::BinOp, style: &TermStyle) -> &'static str {
+    match op {
+        p::BinOp::Mult => style.mult,
+        p::BinOp::Xor => style.xor,
+        p::BinOp::Union => style.union,
+        p::BinOp::NatPlus => style.nat_plus,
+        p::BinOp::Exp | p::BinOp::AcFct(_) => binop_symbol(op),
+    }
+}
+
 // =============================================================================
 // Guarded
 // =============================================================================
 
-fn pp_guarded(g: &Guarded, state: &mut PreciseFreshState, out: &mut String) {
-    pp_guarded_inner(g, false, &[], state, out);
+/// How the one-line guarded-formula printer ([`pretty_guarded_styled`])
+/// spells connectives, quantifiers, facts and terms.
+/// [`FormulaStyle::TAMARIN`] is Tamarin's own output; `crate::pretty_ml` holds
+/// the TamRL Haskell fork's style. The `Doc` printers (`guarded_to_doc` and
+/// friends) always print Tamarin's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormulaStyle {
+    pub term: TermStyle,
+    pub falsum: &'static str,
+    pub verum: &'static str,
+    /// Separators, with their surrounding spaces.
+    pub or: &'static str,
+    pub and: &'static str,
+    pub implies: &'static str,
+    pub subterm: &'static str,
+    pub not: &'static str,
+    pub forall: &'static str,
+    pub exists: &'static str,
+    /// Facts as the fork's `prettyFact` prints them: `Name(a, b)` with an
+    /// `F_`/`L_` name prefix dropped. Otherwise `Name( a, b )`.
+    pub flat_facts: bool,
+}
+
+impl FormulaStyle {
+    pub const TAMARIN: FormulaStyle = FormulaStyle {
+        term: TermStyle::TAMARIN,
+        falsum: "\u{22A5}",
+        verum: "\u{22A4}",
+        or: " \u{2228} ",
+        and: " \u{2227} ",
+        implies: " \u{21D2} ",
+        subterm: " \u{228F} ",
+        not: "\u{00AC}",
+        forall: "\u{2200}",
+        exists: "\u{2203}",
+        flat_facts: false,
+    };
+}
+
+/// The TamRL Haskell fork's `showFactTag` drops an `F_` or `L_` prefix of a
+/// fact name.
+pub(crate) fn strip_fact_name_prefix(name: &str) -> &str {
+    name.strip_prefix("F_")
+        .or_else(|| name.strip_prefix("L_"))
+        .unwrap_or(name)
+}
+
+/// [`pretty_guarded`] in the given style.
+pub fn pretty_guarded_styled(g: &Guarded, style: &FormulaStyle) -> String {
+    let mut s = String::new();
+    let mut state = avoid_precise_guarded(g);
+    pp_guarded_inner(g, false, &[], style, &mut state, &mut s);
+    s
 }
 
 /// Look up the binder for `Bound(n)` given a scope stack (outer-to-inner
@@ -1954,9 +2015,19 @@ fn lookup_bound(n: u32, scope: &[Vec<Bind>]) -> Option<&Bind> {
 /// recovered from the display name (`name` ⇒ 0, `name.k` ⇒ k).
 fn bound_to_varspec(n: u32, scope: &[Vec<Bind>]) -> Option<p::VarSpec> {
     let b = lookup_bound(n, scope)?;
-    let (src_name, sort, display, _src_idx) = b;
-    // display = src_name (idx 0) | "src_name.idx".
-    let idx = if display == src_name {
+    Some(p::VarSpec {
+        name: b.0.clone(),
+        idx: bind_display_idx(b),
+        sort: b.1,
+        typ: None,
+    })
+}
+
+/// The index `allocate_guarded_binders` gave a binder, recovered from its
+/// display name (`name` ⇒ 0, `name.k` ⇒ k).
+fn bind_display_idx(b: &Bind) -> u64 {
+    let (src_name, _sort, display, _src_idx) = b;
+    if display == src_name {
         0
     } else if let Some(suffix) = display
         .strip_prefix(src_name.as_str())
@@ -1965,13 +2036,21 @@ fn bound_to_varspec(n: u32, scope: &[Vec<Bind>]) -> Option<p::VarSpec> {
         suffix.parse::<u64>().unwrap_or(0)
     } else {
         0
+    }
+}
+
+/// A binder or a free formula variable as the fork's `prettyLVar` prints it
+/// (`name.idx:sort`). An `Untagged` hint is a message variable.
+fn pp_var_sorted_hint(name: &str, idx: u64, sort: p::SortHint, out: &mut String) {
+    use p::{SortHint as H, SuffixSort as S};
+    let sort = match sort {
+        H::Pub | H::Suffix(S::Pub) => LSort::Pub,
+        H::Fresh | H::Suffix(S::Fresh) => LSort::Fresh,
+        H::Node | H::Suffix(S::Node) => LSort::Node,
+        H::Nat | H::Suffix(S::Nat) => LSort::Nat,
+        H::Msg | H::Suffix(S::Msg) | H::Untagged => LSort::Msg,
     };
-    Some(p::VarSpec {
-        name: src_name.clone(),
-        idx,
-        sort: *sort,
-        typ: None,
-    })
+    tamarin_term::pretty::pp_var_sorted(name, idx, sort, out);
 }
 
 /// Produce an "opened" copy of a `GTerm` in which every `Bound(n)` leaf is
@@ -2052,6 +2131,7 @@ fn pp_guarded_inner(
     g: &Guarded,
     paren_atomic: bool,
     scope: &[Vec<Bind>],
+    style: &FormulaStyle,
     state: &mut PreciseFreshState,
     out: &mut String,
 ) {
@@ -2064,7 +2144,7 @@ fn pp_guarded_inner(
             if paren_atomic {
                 out.push('(');
             }
-            pp_gatom(a, scope, out);
+            pp_gatom(a, scope, style, out);
             if paren_atomic {
                 out.push(')');
             }
@@ -2075,7 +2155,7 @@ fn pp_guarded_inner(
             if paren_atomic {
                 out.push('(');
             }
-            out.push('\u{22A5}'); // ⊥
+            out.push_str(style.falsum);
             if paren_atomic {
                 out.push(')');
             }
@@ -2085,7 +2165,7 @@ fn pp_guarded_inner(
             if paren_atomic {
                 out.push('(');
             }
-            out.push('\u{22A4}'); // ⊤
+            out.push_str(style.verum);
             if paren_atomic {
                 out.push(')');
             }
@@ -2105,9 +2185,9 @@ fn pp_guarded_inner(
             out.push('(');
             for (i, x) in xs.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(" \u{2228} ");
-                } // ∨
-                pp_guarded_inner(x, true, scope, state, out);
+                    out.push_str(style.or);
+                }
+                pp_guarded_inner(x, true, scope, style, state, out);
             }
             out.push(')');
             if paren_atomic {
@@ -2127,9 +2207,9 @@ fn pp_guarded_inner(
             }
             for (i, x) in xs.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(" \u{2227} ");
-                } // ∧
-                pp_guarded_inner(x, true, scope, state, out);
+                    out.push_str(style.and);
+                }
+                pp_guarded_inner(x, true, scope, style, state, out);
             }
             if needs {
                 out.push(')');
@@ -2147,7 +2227,17 @@ fn pp_guarded_inner(
             // (Guarded.hs:364-373, LTerm.hs:301-302), render under
             // the resulting scope, then restore state on exit.
             state.scope_freshness(|state| {
-                pp_gguarded(qua, vars, guards, body, paren_atomic, scope, state, out)
+                pp_gguarded(
+                    qua,
+                    vars,
+                    guards,
+                    body,
+                    paren_atomic,
+                    scope,
+                    style,
+                    state,
+                    out,
+                )
             })
         }
     }
@@ -2162,6 +2252,7 @@ fn pp_gguarded(
     body: &Guarded,
     paren_atomic: bool,
     scope: &[Vec<Bind>],
+    style: &FormulaStyle,
     state: &mut PreciseFreshState,
     out: &mut String,
 ) {
@@ -2177,14 +2268,14 @@ fn pp_gguarded(
     // case, matching HS and the Doc path `gguarded_to_doc`.
     let mut dante = String::new();
     if guards.is_empty() {
-        dante.push('\u{22A4}'); // ⊤
+        dante.push_str(style.verum);
     } else {
         for (i, gd) in guards.iter().enumerate() {
             if i > 0 {
-                dante.push_str(" \u{2227} ");
+                dante.push_str(style.and);
             }
             dante.push('(');
-            pp_gatom(gd, &new_scope, &mut dante);
+            pp_gatom(gd, &new_scope, style, &mut dante);
             dante.push(')');
         }
     }
@@ -2196,7 +2287,7 @@ fn pp_gguarded(
         if paren_atomic {
             out.push('(');
         }
-        out.push('\u{00AC}'); // ¬
+        out.push_str(style.not);
         out.push_str(&dante);
         if paren_atomic {
             out.push(')');
@@ -2207,12 +2298,12 @@ fn pp_gguarded(
     if paren_atomic {
         out.push('(');
     }
-    out.push(match qua {
-        Quant::All => '\u{2200}', // ∀
-        Quant::Ex => '\u{2203}',  // ∃
+    out.push_str(match qua {
+        Quant::All => style.forall,
+        Quant::Ex => style.exists,
     });
     out.push(' ');
-    pp_binding_list_with_display(&new_scope[scope.len()], out);
+    pp_binding_list_with_display(&new_scope[scope.len()], &style.term, out);
     out.push_str(". ");
     // HS `(Ex, _, GConj []) -> sep [quantifier, dante]` (Guarded.hs:856-857):
     // existential with trivially-true body renders as `∃ vs. <dante>` with
@@ -2222,14 +2313,14 @@ fn pp_gguarded(
     out.push_str(&dante);
     if !(matches!(qua, Quant::Ex) && body_is_true(body)) {
         let connective = match qua {
-            Quant::All => " \u{21D2} ", // ⇒
-            Quant::Ex => " \u{2227} ",  // ∧
+            Quant::All => style.implies,
+            Quant::Ex => style.and,
         };
         out.push_str(connective);
         // HS Guarded.hs:860-862: `dsucc <- nest 1 <$> pp gf` — the body is
         // rendered BARE (no `opParens`); only the body's own pp may emit
         // parens (e.g. GDisj self-wraps).  paren_atomic=false here.
-        pp_guarded_inner(body, false, &new_scope, state, out);
+        pp_guarded_inner(body, false, &new_scope, style, state, out);
     }
     if paren_atomic {
         out.push(')');
@@ -2239,11 +2330,20 @@ fn pp_gguarded(
 /// Render the binder line for a GGuarded — uses the display names
 /// allocated by `allocate_guarded_binders` (HS `freshLVar`, LTerm.hs
 /// 295-296), so a shadowed inner binder emits `#j.1` instead of `#j`.
-fn pp_binding_list_with_display(bs: &[Bind], out: &mut String) {
+fn pp_binding_list_with_display(bs: &[Bind], style: &TermStyle, out: &mut String) {
     for (i, b) in bs.iter().enumerate() {
         if i > 0 {
             out.push(' ');
         }
+        pp_bind(b, style, out);
+    }
+}
+
+/// A binder's display name, as in the binder list and at its occurrences.
+fn pp_bind(b: &Bind, style: &TermStyle, out: &mut String) {
+    if style.sorted_vars {
+        pp_var_sorted_hint(&b.0, bind_display_idx(b), b.1, out);
+    } else {
         out.push_str(sort_prefix_from_hint(b.1));
         out.push_str(&b.2);
     }
@@ -2415,53 +2515,81 @@ fn gguarded_to_doc(
 /// Pretty-print a binder list — uses each entry's display name, which
 /// is the source name (idx==0) or `name.<idx>` (HS `show LVar`,
 /// LTerm.hs:550-557) after `freshLVar` allocation.
-fn pp_gatom(a: &crate::guarded::GAtom, scope: &[Vec<Bind>], out: &mut String) {
+fn pp_gatom(
+    a: &crate::guarded::GAtom,
+    scope: &[Vec<Bind>],
+    style: &FormulaStyle,
+    out: &mut String,
+) {
+    let ts = &style.term;
     use crate::guarded::GAtom;
     match a {
         GAtom::Eq(l, r) => {
-            pp_gterm(l, scope, out);
+            pp_gterm_styled(l, scope, ts, out);
             out.push_str(" = ");
-            pp_gterm(r, scope, out);
+            pp_gterm_styled(r, scope, ts, out);
         }
         GAtom::Less(l, r) => {
-            pp_gterm(l, scope, out);
+            pp_gterm_styled(l, scope, ts, out);
             out.push_str(" < ");
-            pp_gterm(r, scope, out);
+            pp_gterm_styled(r, scope, ts, out);
         }
         // Multiset `(<)`: HS has no printer for it (it is expanded to
         // `∃ z. r = l ++ z` before guarded conversion — see
         // `predicate_expand::expand_atom`).  Defensive fallback only.
         GAtom::LessMset(l, r) => {
-            pp_gterm(l, scope, out);
+            pp_gterm_styled(l, scope, ts, out);
             out.push_str(" (<) ");
-            pp_gterm(r, scope, out);
+            pp_gterm_styled(r, scope, ts, out);
         }
         GAtom::Subterm(l, r) => {
-            pp_gterm(l, scope, out);
-            out.push_str(" \u{228F} "); // ⊏
-            pp_gterm(r, scope, out);
+            pp_gterm_styled(l, scope, ts, out);
+            out.push_str(style.subterm);
+            pp_gterm_styled(r, scope, ts, out);
         }
         GAtom::Action(fa, t) => {
-            pp_gfact(fa, scope, out);
+            pp_gfact(fa, scope, style, out);
             out.push_str(" @ ");
-            pp_gterm(t, scope, out);
+            pp_gterm_styled(t, scope, ts, out);
         }
         GAtom::Last(t) => {
             out.push_str("last(");
-            pp_gterm(t, scope, out);
+            pp_gterm_styled(t, scope, ts, out);
             out.push(')');
         }
-        GAtom::Pred(fa) => pp_gfact(fa, scope, out),
+        GAtom::Pred(fa) => pp_gfact(fa, scope, style, out),
     }
 }
 
-fn pp_gfact(fa: &crate::guarded::GFact, scope: &[Vec<Bind>], out: &mut String) {
-    // HS-faithful: `Name( args )` with internal spaces, matching `pp_fact`.
-    // Empty-arg case collapses to a single inner space — see `pp_fact`
-    // for the HS citation.
+fn pp_gfact(
+    fa: &crate::guarded::GFact,
+    scope: &[Vec<Bind>],
+    style: &FormulaStyle,
+    out: &mut String,
+) {
     if fa.persistent {
         out.push('!');
     }
+    if style.flat_facts {
+        // The fork's `ppFact n t = text (n ++ "(") <> hcat (punctuate ", "
+        // ...) <> text ")"`, annotations right after the `)`.
+        out.push_str(strip_fact_name_prefix(&fa.name));
+        out.push('(');
+        for (i, t) in fa.args.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            pp_gterm_styled(t, scope, &style.term, out);
+        }
+        out.push(')');
+        if let Some(ann) = fact_annotations_suffix(&fa.annotations) {
+            out.push_str(&ann);
+        }
+        return;
+    }
+    // HS-faithful: `Name( args )` with internal spaces, matching `pp_fact`.
+    // Empty-arg case collapses to a single inner space — see `pp_fact`
+    // for the HS citation.
     out.push_str(&fa.name);
     if fa.args.is_empty() {
         out.push_str("( )");
@@ -2471,7 +2599,7 @@ fn pp_gfact(fa: &crate::guarded::GFact, scope: &[Vec<Bind>], out: &mut String) {
             if i > 0 {
                 out.push_str(", ");
             }
-            pp_gterm(t, scope, out);
+            pp_gterm_styled(t, scope, &style.term, out);
         }
         out.push_str(" )");
     }
@@ -2479,26 +2607,42 @@ fn pp_gfact(fa: &crate::guarded::GFact, scope: &[Vec<Bind>], out: &mut String) {
 
 /// [`pp_pair_term`] over `GTerm`: HS `ppTerms ", " 1 "<" ">" (split t)`
 /// (Term/Term.hs:313,319-321) as a string, for a pair-shaped `t`.
-fn pp_pair_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
+fn pp_pair_gterm(
+    t: &crate::guarded::GTerm,
+    scope: &[Vec<Bind>],
+    style: &TermStyle,
+    out: &mut String,
+) {
     let flat = flatten_pair_gterms(t);
     out.push('<');
     for (i, it) in flat.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        pp_gterm(it, scope, out);
+        pp_gterm_styled(it, scope, style, out);
     }
     out.push('>');
 }
 
 fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
+    pp_gterm_styled(t, scope, &TermStyle::TAMARIN, out)
+}
+
+fn pp_gterm_styled(
+    t: &crate::guarded::GTerm,
+    scope: &[Vec<Bind>],
+    style: &TermStyle,
+    out: &mut String,
+) {
     use crate::guarded::{BVar, GTerm};
     match t {
+        GTerm::Var(BVar::Free(v)) if style.sorted_vars => {
+            pp_var_sorted_hint(&v.name, v.idx, v.sort, out)
+        }
         GTerm::Var(BVar::Free(v)) => pp_var(v, out),
         GTerm::Var(BVar::Bound(n)) => {
             if let Some(b) = lookup_bound(*n, scope) {
-                out.push_str(sort_prefix_from_hint(b.1));
-                out.push_str(&b.2);
+                pp_bind(b, style, out);
             } else {
                 // Out-of-range De Bruijn index: corresponds to no HS output
                 // path. HS `pp (GAto a) = prettyNAtom $ bvarToLVar a`
@@ -2540,7 +2684,7 @@ fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
         // arm precedes the generic `App` arm below, which would otherwise
         // print `pair(a, b)` through `ppFun`.
         GTerm::App(name, args) if &**name == "pair" && args.len() == 2 => {
-            pp_pair_gterm(t, scope, out)
+            pp_pair_gterm(t, scope, style, out)
         }
         // A 0-arity symbol renders BARE, without an argument list: HS
         // `FApp (NoEq (f, _)) [] -> text (BC.unpack f)` (Term/Term.hs:314)
@@ -2554,7 +2698,7 @@ fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                pp_gterm(a, scope, out);
+                pp_gterm_styled(a, scope, style, out);
             }
             out.push(')');
         }
@@ -2565,17 +2709,17 @@ fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
             // function form `name(a, b)`.
             out.push_str(name);
             out.push('(');
-            pp_gterm(a, scope, out);
+            pp_gterm_styled(a, scope, style, out);
             out.push_str(", ");
-            pp_gterm(b, scope, out);
+            pp_gterm_styled(b, scope, style, out);
             out.push(')');
         }
-        GTerm::Pair(_) => pp_pair_gterm(t, scope, out),
+        GTerm::Pair(_) => pp_pair_gterm(t, scope, style, out),
         GTerm::Diff(l, r) => {
             out.push_str("diff(");
-            pp_gterm(l, scope, out);
+            pp_gterm_styled(l, scope, style, out);
             out.push_str(", ");
-            pp_gterm(r, scope, out);
+            pp_gterm_styled(r, scope, style, out);
             out.push(')');
         }
         GTerm::BinOp(op, l, r) => {
@@ -2592,9 +2736,9 @@ fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
             // parser-AST `pp_term` AC handling above.
             let is_exp = matches!(op, p::BinOp::Exp);
             if is_exp {
-                pp_gterm(l, scope, out);
-                out.push_str(binop_symbol(*op));
-                pp_gterm(r, scope, out);
+                pp_gterm_styled(l, scope, style, out);
+                out.push_str(binop_symbol_styled(*op, style));
+                pp_gterm_styled(r, scope, style, out);
                 return;
             }
             let mut flat: Vec<&crate::guarded::GTerm> = Vec::new();
@@ -2604,18 +2748,18 @@ fn pp_gterm(t: &crate::guarded::GTerm, scope: &[Vec<Bind>], out: &mut String) {
             // `sort_ac_args_for_display` / Guarded.hs:846-849,290).
             sort_ac_args_for_display(&mut flat, scope);
             out.push('(');
-            let sym = binop_symbol(*op);
+            let sym = binop_symbol_styled(*op, style);
             for (i, child) in flat.iter().enumerate() {
                 if i > 0 {
                     out.push_str(sym);
                 }
-                pp_gterm(child, scope, out);
+                pp_gterm_styled(child, scope, style, out);
             }
             out.push(')');
         }
         GTerm::PatMatch(inner) => {
             out.push('=');
-            pp_gterm(inner, scope, out);
+            pp_gterm_styled(inner, scope, style, out);
         }
     }
 }

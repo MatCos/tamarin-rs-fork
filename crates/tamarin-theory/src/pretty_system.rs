@@ -31,7 +31,7 @@
 //! set iteration orders).  These are interactive-UI diagnostic panes only
 //! and do not affect proof results or golden `--prove` output.
 
-use tamarin_term::pretty::{pp_lvar, pretty_lnterm};
+use tamarin_term::pretty::{pp_lvar, pretty_lnterm_styled};
 
 use crate::constraint::constraints::{Goal, NodeId};
 use crate::constraint::system::{SourceKind, System};
@@ -455,6 +455,16 @@ fn pretty_source_kind(sk: Option<SourceKind>) -> &'static str {
 /// The flat form here is for the env-gated debug dumps in
 /// `constraint::solver::context`, where one fact per line is the point.
 pub fn pretty_fact(fa: &LNFact) -> String {
+    pretty_fact_styled(fa, &crate::pretty_formula::FormulaStyle::TAMARIN)
+}
+
+/// [`pretty_fact`] with the terms in `style.term`, and with an `F_`/`L_`
+/// name prefix dropped if `style.flat_facts` (the TamRL Haskell fork's
+/// `showFactTag`).
+pub(crate) fn pretty_fact_styled(
+    fa: &LNFact,
+    style: &crate::pretty_formula::FormulaStyle,
+) -> String {
     use crate::fact::{fact_tag_multiplicity, FactAnnotation, Multiplicity};
     // Matches Haskell `showFactTag` (Theory/Model/Fact.hs:549-553): the `!` prefix is
     // applied to any tag whose `factTagMultiplicity` is `Persistent`,
@@ -465,7 +475,16 @@ pub fn pretty_fact(fa: &LNFact) -> String {
         ""
     };
     let name = fact_tag_name(&fa.tag);
-    let args: Vec<String> = fa.terms.iter().map(pretty_lnterm).collect();
+    let name = if style.flat_facts {
+        crate::pretty_formula::strip_fact_name_prefix(&name)
+    } else {
+        &name
+    };
+    let args: Vec<String> = fa
+        .terms
+        .iter()
+        .map(|t| pretty_lnterm_styled(t, &style.term))
+        .collect();
     let base = format!("{}{}({})", prefix, name, args.join(", "));
     // Matches Haskell `ppAnn` (Theory/Model/Fact.hs:573-574): when annotations are
     // present, append `[a1, a2]` using `showFactAnnotation` for each.

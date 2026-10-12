@@ -85,6 +85,7 @@ pub mod predicate;
 pub mod predicate_expand;
 pub mod pretty_formula;
 pub mod pretty_hpj;
+pub mod pretty_ml;
 pub mod pretty_sapic;
 pub mod pretty_system;
 pub mod pretty_theory;

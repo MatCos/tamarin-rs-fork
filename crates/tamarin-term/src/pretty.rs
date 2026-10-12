@@ -35,7 +35,7 @@ use tamarin_utils::FastMap;
 use crate::function_symbols::{
     diff_sym, exp_sym, nat_one_sym, pair_sym, AcSym, CSym, FunSym, EMAP_SYM_STRING,
 };
-use crate::lterm::{sort_prefix, LSort, LVar, Name, NameTag};
+use crate::lterm::{sort_prefix, sort_suffix, LSort, LVar, Name, NameTag};
 use crate::term::Term;
 use crate::vterm::Lit;
 
@@ -47,6 +47,55 @@ pub fn pretty_lnterm<T: PrettyTerm + ?Sized>(t: &T) -> String {
     let mut s = String::new();
     t.pretty_into(&mut s);
     s
+}
+
+/// How the one-line term printer spells the builtin AC operators and
+/// variables. [`TermStyle::TAMARIN`] is Tamarin's own output; the other style
+/// in use is the TamRL Haskell fork's (`tamarin_theory::pretty_ml`), which
+/// changed these strings through `prettyTerm`'s parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermStyle {
+    /// Separators of `Mult`, `Xor`, `Union`, `NatPlus`. User-defined AC
+    /// symbols keep their `" f "` separator in every style.
+    pub mult: &'static str,
+    pub xor: &'static str,
+    pub union: &'static str,
+    pub nat_plus: &'static str,
+    /// Variables as `name.idx:sort` (index always printed, no sigil) instead
+    /// of `show LVar`'s `~name.idx`.
+    pub sorted_vars: bool,
+}
+
+impl TermStyle {
+    pub const TAMARIN: TermStyle = TermStyle {
+        mult: "*",
+        xor: "\u{2295}",
+        union: "++",
+        nat_plus: "%+",
+        sorted_vars: false,
+    };
+
+    fn ac_separator(&self, op: AcSym) -> &'static str {
+        match op {
+            AcSym::Mult => self.mult,
+            AcSym::Xor => self.xor,
+            AcSym::Union => self.union,
+            AcSym::NatPlus => self.nat_plus,
+            AcSym::AcFct(_) => ac_op_symbol(op),
+        }
+    }
+}
+
+/// [`pretty_lnterm`] in the given style.
+pub fn pretty_lnterm_styled(t: &Term<Lit<Name, LVar>>, style: &TermStyle) -> String {
+    let mut s = String::new();
+    pp_term_lnterm(t, style, &mut s);
+    s
+}
+
+/// A variable as `name.idx:sort`: the TamRL Haskell fork's `prettyLVar`.
+pub fn pp_var_sorted(name: &str, idx: u64, sort: LSort, out: &mut String) {
+    let _ = write!(out, "{name}.{idx}:{}", sort_suffix(sort));
 }
 
 /// Trait for terms that know how to render themselves in the
@@ -63,13 +112,13 @@ pub trait PrettyTerm {
 
 impl PrettyTerm for Term<Lit<Name, LVar>> {
     fn pretty_into(&self, out: &mut String) {
-        pp_term_lnterm(self, out);
+        pp_term_lnterm(self, &TermStyle::TAMARIN, out);
     }
 }
 
-fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
+fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, style: &TermStyle, out: &mut String) {
     match t {
-        Term::Lit(l) => pp_lit_lnterm(l, out),
+        Term::Lit(l) => pp_lit_lnterm(l, style, out),
         // Haskell `prettyTerm` matches the user-defined AC symbols BEFORE the
         // builtin AC operators, and prints a nullary application as the bare
         // symbol name (`FApp (AC (ACfct (f, _))) [] -> text (BC.unpack f)`).
@@ -83,13 +132,17 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
             // infix list joined by the AC operator symbol.  The separator
             // only ever appears BETWEEN operands, so a 1-element `ts` never
             // resolves one.
-            let op = if ts.len() > 1 { ac_op_symbol(*o) } else { "" };
+            let op = if ts.len() > 1 {
+                style.ac_separator(*o)
+            } else {
+                ""
+            };
             out.push('(');
             for (i, child) in ts.iter().enumerate() {
                 if i > 0 {
                     out.push_str(op);
                 }
-                pp_term_lnterm(child, out);
+                pp_term_lnterm(child, style, out);
             }
             out.push(')');
         }
@@ -97,15 +150,15 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
         // privacy/constructability), e.g. `s == expSym` — not just the
         // name+arity (Term/Term.hs:310-313).
         Term::App(FunSym::NoEq(sym), ts) if ts.len() == 2 && *sym == exp_sym() => {
-            pp_term_lnterm(&ts[0], out);
+            pp_term_lnterm(&ts[0], style, out);
             out.push('^');
-            pp_term_lnterm(&ts[1], out);
+            pp_term_lnterm(&ts[1], style, out);
         }
         Term::App(FunSym::NoEq(sym), ts) if ts.len() == 2 && *sym == diff_sym() => {
             out.push_str("diff(");
-            pp_term_lnterm(&ts[0], out);
+            pp_term_lnterm(&ts[0], style, out);
             out.push_str(", ");
-            pp_term_lnterm(&ts[1], out);
+            pp_term_lnterm(&ts[1], style, out);
             out.push(')');
         }
         Term::App(FunSym::NoEq(sym), ts) if ts.is_empty() && *sym == nat_one_sym() => {
@@ -120,7 +173,7 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                pp_term_lnterm(c, out);
+                pp_term_lnterm(c, style, out);
             }
             out.push('>');
         }
@@ -132,7 +185,7 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    pp_term_lnterm(c, out);
+                    pp_term_lnterm(c, style, out);
                 }
                 out.push(')');
             }
@@ -144,7 +197,7 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                pp_term_lnterm(c, out);
+                pp_term_lnterm(c, style, out);
             }
             out.push(')');
         }
@@ -155,7 +208,7 @@ fn pp_term_lnterm(t: &Term<Lit<Name, LVar>>, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                pp_term_lnterm(c, out);
+                pp_term_lnterm(c, style, out);
             }
             out.push(')');
         }
@@ -178,8 +231,9 @@ fn collect_pair_tail<'a>(t: &'a Term<Lit<Name, LVar>>, out: &mut Vec<&'a Term<Li
     out.push(t);
 }
 
-fn pp_lit_lnterm(l: &Lit<Name, LVar>, out: &mut String) {
+fn pp_lit_lnterm(l: &Lit<Name, LVar>, style: &TermStyle, out: &mut String) {
     match l {
+        Lit::Var(v) if style.sorted_vars => pp_var_sorted(v.name, v.idx, v.sort, out),
         Lit::Var(v) => pp_lvar(v, out),
         Lit::Con(n) => pp_name(n, out),
     }
@@ -280,7 +334,7 @@ pub fn ac_fct_op_symbol(name: &str) -> &'static str {
 impl fmt::Display for Term<Lit<Name, LVar>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut buf = String::new();
-        pp_term_lnterm(self, &mut buf);
+        pp_term_lnterm(self, &TermStyle::TAMARIN, &mut buf);
         f.write_str(&buf)
     }
 }
@@ -288,7 +342,7 @@ impl fmt::Display for Term<Lit<Name, LVar>> {
 impl fmt::Display for Lit<Name, LVar> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut buf = String::new();
-        pp_lit_lnterm(self, &mut buf);
+        pp_lit_lnterm(self, &TermStyle::TAMARIN, &mut buf);
         f.write_str(&buf)
     }
 }
