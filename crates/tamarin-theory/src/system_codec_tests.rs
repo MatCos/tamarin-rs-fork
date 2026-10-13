@@ -236,4 +236,10 @@ fn garbage_is_an_error_not_a_panic() {
         decode_system(&method),
         Err(CodecError::Postcard(_))
     ));
+    // A system's first bytes can read as a method; the rest is not ignored.
+    let system = encode_system(&small_system());
+    assert!(matches!(
+        decode_proof_method(&system),
+        Err(CodecError::TrailingBytes(_))
+    ));
 }

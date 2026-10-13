@@ -42,6 +42,10 @@ pub enum CodecError {
     Base64(base64::DecodeError),
     Gzip(std::io::Error),
     Postcard(postcard::Error),
+    /// Bytes left over after the value: most likely a token of the other
+    /// kind (a system read as a method), whose first bytes happen to read
+    /// as a value of this kind.
+    TrailingBytes(usize),
 }
 
 impl std::fmt::Display for CodecError {
@@ -50,6 +54,7 @@ impl std::fmt::Display for CodecError {
             CodecError::Base64(e) => write!(f, "invalid base64url: {e}"),
             CodecError::Gzip(e) => write!(f, "invalid gzip data: {e}"),
             CodecError::Postcard(e) => write!(f, "invalid postcard data: {e}"),
+            CodecError::TrailingBytes(n) => write!(f, "{n} bytes left after the value"),
         }
     }
 }
@@ -71,7 +76,11 @@ fn decode<T: DeserializeOwned>(token: &str) -> Result<T, CodecError> {
     GzDecoder::new(&gz[..])
         .read_to_end(&mut raw)
         .map_err(CodecError::Gzip)?;
-    postcard::from_bytes(&raw).map_err(CodecError::Postcard)
+    let (value, rest) = postcard::take_from_bytes(&raw).map_err(CodecError::Postcard)?;
+    if !rest.is_empty() {
+        return Err(CodecError::TrailingBytes(rest.len()));
+    }
+    Ok(value)
 }
 
 /// Encode a system as a token (postcard, gzip, base64url).
