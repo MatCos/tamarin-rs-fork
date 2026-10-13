@@ -4359,25 +4359,26 @@ fn drop_trivially_true_formulas_pass(red: &mut Reduction) -> ChangeIndicator {
 /// `insert_implied_formulas_pass` produces variants that compare
 /// unequal, accumulating duplicate IH-Disjs.
 fn dedupe_formulas_pass(red: &mut Reduction) -> ChangeIndicator {
+    use crate::constraint::solver::reduction::first_occurrences;
     use crate::guarded::{normalize_sort_hints, Guarded};
-    let before = red.sys.formulas.len();
-    let mut seen: Vec<std::sync::Arc<Guarded>> = Vec::new();
-    let mut seen_canon: Vec<Guarded> = Vec::new();
     // Read via `iter()` (Deref, no mut borrow) so the common no-op path (no
     // duplicates) takes ZERO mutable borrow and ZERO stamp bump — this pass
     // runs every simplify fixpoint iteration, including the final no-op one
     // that follows the `subst_system` marker-set, and an unconditional bump
     // here would staleify that marker and collapse the skip (design Finding 2).
-    for f in red.sys.formulas.iter() {
-        let canon = normalize_sort_hints(f);
-        if !seen_canon.contains(&canon) {
-            seen_canon.push(canon);
-            seen.push(f.clone());
-        }
-    }
-    if seen.len() != before {
+    let canons: Vec<Guarded> = red
+        .sys
+        .formulas
+        .iter()
+        .map(|f| normalize_sort_hints(f))
+        .collect();
+    let first = first_occurrences(&canons);
+    if first.contains(&false) {
         // A real drop: `formulas_mut()` bumps `content_stamp` on handout.
-        *red.sys.formulas_mut() = seen;
+        let mut keep = first.iter();
+        red.sys
+            .formulas_mut()
+            .retain(|_| *keep.next().unwrap_or(&false));
         red.changed = ChangeIndicator::Changed;
         ChangeIndicator::Changed
     } else {
