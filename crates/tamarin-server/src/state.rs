@@ -328,4 +328,20 @@ impl TheoryStore {
 pub struct AppState {
     pub cfg: crate::ServerConfig,
     pub store: TheoryStore,
+    /// The RL API's own state, built from the theories in `store` when the
+    /// state is created (see [`crate::api`]).
+    #[cfg(feature = "rl")]
+    pub api: crate::api::ApiState,
+}
+
+impl AppState {
+    /// Build the state; call it after the startup theories are in `store`.
+    pub fn new(cfg: crate::ServerConfig, store: TheoryStore) -> Self {
+        AppState {
+            #[cfg(feature = "rl")]
+            api: crate::api::ApiState::from_store(&store),
+            cfg,
+            store,
+        }
+    }
 }

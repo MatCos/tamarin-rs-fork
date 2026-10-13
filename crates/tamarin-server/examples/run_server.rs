@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         dot_path: "dot".to_string(),
         json_path: None,
         heuristic: Default::default(),
+        maude_processes: 4,
     };
     tamarin_server::serve(cfg, theories).await
 }

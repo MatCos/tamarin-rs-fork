@@ -127,6 +127,26 @@ pub struct ProofState {
     pub session: Option<Arc<tamarin_theory::prove::ProverSession>>,
 }
 
+/// The theory's cut strategy, with HS `closeTheory` precedence
+/// (TheoryLoader.hs:742, :759-762): the CLI `--stop-on-trace` wins; the
+/// theory's `configuration:` block is consulted only when the flag is
+/// absent.
+pub(crate) fn effective_cut(
+    parser_theory: &tamarin_parser::ast::Theory,
+    cli_cut: Option<tamarin_theory::constraint::solver::context::CutStrategy>,
+) -> Result<tamarin_theory::constraint::solver::context::CutStrategy, String> {
+    use tamarin_theory::constraint::solver::context::CutStrategy;
+    Ok(match cli_cut {
+        Some(c) => c,
+        None => match &parser_theory.configuration {
+            Some(cfg) => tamarin_theory::prove::config_block_options(cfg)?
+                .0
+                .unwrap_or(CutStrategy::Dfs),
+            None => CutStrategy::Dfs,
+        },
+    })
+}
+
 impl ProofState {
     /// Build the [`ProofContext`] + initial per-lemma roots for a
     /// freshly loaded theory.  Mirrors the construction in
@@ -145,20 +165,9 @@ impl ProofState {
         in_file: &str,
         ndc_cache: Option<&tamarin_theory::constraint::solver::context::IntrRuleCache>,
     ) -> Result<Self, String> {
-        // Effective cut strategy — HS `closeTheory` precedence
-        // (TheoryLoader.hs:742, :759-762): the CLI `--stop-on-trace` wins;
-        // the theory's `configuration:` block is consulted only when
-        // the flag is absent.  Steers the session's autoprove
-        // (`runAutoProver`'s `apCut`) and the shared web context.
-        let cut = match cli_cut {
-            Some(c) => c,
-            None => match &parser_theory.configuration {
-                Some(cfg) => tamarin_theory::prove::config_block_options(cfg)?
-                    .0
-                    .unwrap_or(tamarin_theory::constraint::solver::context::CutStrategy::Dfs),
-                None => tamarin_theory::constraint::solver::context::CutStrategy::Dfs,
-            },
-        };
+        // Steers the session's autoprove (`runAutoProver`'s `apCut`) and the
+        // shared web context.
+        let cut = effective_cut(parser_theory, cli_cut)?;
         // Install the user-fn-symbol thread-locals for the WHOLE build —
         // every `formula_to_guarded` below (restrictions, lemma formulas,
         // reuse lemmas) resolves nullary/unary user funs through them.

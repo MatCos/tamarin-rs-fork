@@ -430,6 +430,9 @@ fn run_interactive(args: &Args) -> Result<i32, RunError> {
         oracle_name: args.oracle_name.clone(),
         oracle_only: args.oracle_only,
     };
+    // Maude processes per theory for the RL API's parallel proof steps (only
+    // read with feature `rl`); same defaults as the batch pool.
+    cfg.maude_processes = args.effective_maude_processes();
     // `--with-dot` / `--with-json` — HS stores `readOutputCommand as`
     // (Environment.hs:41-45) as `WebUI.outputCmd` (Interactive.hs:138,
     // Web/Types.hs:152); the graph route then spawns `ocGraphCommand` —

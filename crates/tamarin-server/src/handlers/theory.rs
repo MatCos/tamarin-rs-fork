@@ -467,15 +467,6 @@ fn render_theory_source(entry: &crate::state::TheoryEntry) -> String {
     // which reads the user-fn thread-locals — empty on an axum worker thread.
     // See `TheoryEntry::install_user_funs`.
     let _user_funs_guard = entry.install_user_funs();
-    let build = tamarin_theory::pretty_theory::BuildInfo {
-        tamarin_version: env!("CARGO_PKG_VERSION").to_string(),
-        maude_version: String::new(),
-        git_revision: String::new(),
-        git_branch: String::new(),
-        compiled_at: String::new(),
-    };
-    let wf_block = tamarin_theory::pretty_theory::format_wf_block(&entry.wf_report);
-    let in_file = entry.origin.label();
     // Live proof bodies (HS `prettyClosedTheory` prints the stored
     // `IncrementalProof` of every lemma; see doc comment above).
     let proved: Vec<tamarin_theory::pretty_theory::ProvedLemma> = match &entry.proof_state {
@@ -492,10 +483,30 @@ fn render_theory_source(entry: &crate::state::TheoryEntry) -> String {
             .collect(),
         None => Vec::new(),
     };
+    render_closed_theory(entry, &proved)
+}
+
+/// [`render_theory_source`] with the given lemma proofs (a lemma missing
+/// from `proved` prints `by sorry`).  The RL API's `check-proof` renders its
+/// `proofFile` through here.
+pub(crate) fn render_closed_theory(
+    entry: &crate::state::TheoryEntry,
+    proved: &[tamarin_theory::pretty_theory::ProvedLemma],
+) -> String {
+    let _user_funs_guard = entry.install_user_funs();
+    let build = tamarin_theory::pretty_theory::BuildInfo {
+        tamarin_version: env!("CARGO_PKG_VERSION").to_string(),
+        maude_version: String::new(),
+        git_revision: String::new(),
+        git_branch: String::new(),
+        compiled_at: String::new(),
+    };
+    let wf_block = tamarin_theory::pretty_theory::format_wf_block(&entry.wf_report);
+    let in_file = entry.origin.label();
     let mut body = tamarin_theory::pretty_theory::pretty_closed_theory(
         &entry.parser_theory,
         &entry.typed_theory,
-        &proved,
+        proved,
         &wf_block,
         &build,
         &in_file,

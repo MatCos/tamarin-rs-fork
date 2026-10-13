@@ -30,6 +30,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+[features]
+# The JSON API for the TamRL reinforcement-learning client (`/api/v1`).
+rl = ["tamarin-theory/serde"]
+
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }

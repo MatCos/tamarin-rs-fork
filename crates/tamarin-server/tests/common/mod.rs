@@ -99,6 +99,7 @@ pub async fn start_server_with_theory_and(
         dot_path: "dot".to_string(),
         json_path: None,
         heuristic: Default::default(),
+        maude_processes: 4,
     };
     mutate(&mut cfg);
 
@@ -112,7 +113,7 @@ pub async fn start_server_with_theory_and(
     .expect("fixture should parse + elaborate");
     let _idx = store.insert(entry);
 
-    let state = Arc::new(AppState { cfg, store });
+    let state = Arc::new(AppState::new(cfg, store));
     let app = router(state.clone());
 
     // Bind to an ephemeral port; remember the resolved socket addr.

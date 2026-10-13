@@ -210,10 +210,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     for (path, handler) in theory_routes() {
         router = router.route(path, handler);
     }
-    router
+    let router = router
         // Every miss among the routes above — and the routing-level miss for a
         // URL matching none of them — is rendered as Yesod's Not Found page.
-        .layer(axum::middleware::from_fn(not_found_page))
+        .layer(axum::middleware::from_fn(not_found_page));
+    // The RL API answers in JSON, its misses included, so it is nested after
+    // the Not Found page layer.
+    #[cfg(feature = "rl")]
+    let router = router.nest("/api/v1", crate::api::routes());
+    router
         // ----------------------------------------------------------------
         // Static assets: serve `data/` with frontend-dist hoisting —
         // the bundled `frontend/dist/` is served first for the

@@ -30,5 +30,9 @@ mimalloc = { version = "0.1", default-features = false }
 rayon = { workspace = true }
 clap = { workspace = true }
 
+[features]
+# `interactive` also serves the JSON API for the TamRL client (`/api/v1`).
+rl = ["tamarin-server/rl"]
+
 [lints]
 workspace = true

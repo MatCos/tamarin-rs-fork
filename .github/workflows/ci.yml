@@ -23,6 +23,9 @@ jobs:
           submodules: true
       - run: rustup update stable --no-self-update && rustup default stable
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The RL API (feature `rl`, which turns on tamarin-theory's `serde`) is
+      # not built by the line above.
+      - run: cargo clippy -p tamarin-theory -p tamarin-server -p tamarin-prover --all-targets --features tamarin-server/rl -- -D warnings
       # Every HS line cite in crates/ comments must resolve against the pinned
       # submodule (scripts/check_hs_cites.py — MISSING/AMBIGUOUS/RANGE/BLANK/
       # COMMENT/SEELINE).  Ordinary PRs edit cites too, not just bumps, and
@@ -82,6 +85,17 @@ jobs:
       # Cargo.toml) — the release profile re-runs whole-graph LTO at every
       # test-binary link, which dwarfs everything else this job does.
       - run: export PATH="/opt/maude:$PATH" && cargo test --profile ci --workspace
+        env:
+          MAUDE_PATH: /opt/maude/maude
+      # The tests behind features, which the line above does not build: the
+      # token codec (tamarin-theory `serde`) and the RL API (tamarin-server
+      # `rl`).
+      - name: Feature-gated tests (codec, RL API)
+        run: |
+          export PATH="/opt/maude:$PATH"
+          cargo test --profile ci -p tamarin-theory --features serde --lib system_codec
+          cargo test --profile ci -p tamarin-theory --features serde --test system_codec_walk
+          cargo test --profile ci -p tamarin-server --features rl --test api_rl
         env:
           MAUDE_PATH: /opt/maude/maude
       # Wellformedness fixture roster, port side (~2s; the step above has

@@ -53,6 +53,8 @@
 // the `disallowed_macros` freeze is allowed for this file.
 #![allow(clippy::disallowed_macros)]
 
+#[cfg(feature = "rl")]
+pub mod api;
 pub mod handlers;
 pub mod routes;
 pub mod state;
@@ -105,6 +107,10 @@ pub struct ServerConfig {
     /// default).  As in HS, a given `--heuristic` overrides every lemma's
     /// and theory's heuristic, for autoprove and for the ranked method list.
     pub heuristic: tamarin_theory::prove::CliHeuristic,
+    /// Maude processes per theory that the RL API (feature `rl`) runs proof
+    /// steps on; parallel requests beyond this wait for a free one.  Set
+    /// from `--maude-processes` / `--processors`; unused without the feature.
+    pub maude_processes: usize,
 }
 
 impl ServerConfig {
@@ -119,6 +125,7 @@ impl ServerConfig {
             dot_path: "dot".to_string(),
             json_path: None,
             heuristic: Default::default(),
+            maude_processes: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
 }
@@ -203,10 +210,7 @@ pub async fn serve(
         }
     }
 
-    let state = Arc::new(AppState {
-        cfg: cfg.clone(),
-        store,
-    });
+    let state = Arc::new(AppState::new(cfg.clone(), store));
 
     let app = router(state.clone());
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
