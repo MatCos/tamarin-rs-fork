@@ -228,6 +228,12 @@ fn detect_maude() -> String {
     resolve_maude().unwrap_or_else(|| "maude".into())
 }
 
+/// The maude the harness servers load theories with (see [`detect_maude`]).
+#[allow(dead_code)]
+pub fn maude_path() -> String {
+    detect_maude()
+}
+
 /// True when a Maude binary is available — [`resolve_maude`] answering
 /// `Some`.  Tests that boot a real `ProofContext` use this as a skip-guard.
 ///

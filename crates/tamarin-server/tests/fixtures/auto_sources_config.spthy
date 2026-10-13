@@ -1,0 +1,19 @@
+theory AutoSourcesConfig
+configuration: "--auto-sources"
+begin
+
+builtins: symmetric-encryption
+
+rule Setup:
+  [ Fr(~k) ] --> [ !Key(~k) ]
+
+rule Send:
+  [ !Key(k), Fr(~m) ] --> [ Out(senc(~m, k)) ]
+
+rule Recv:
+  [ !Key(k), In(senc(x, k)) ] --[ Got(x) ]-> [ Out(x) ]
+
+lemma got_is_secret:
+  "All x #i. Got(x) @ i ==> not (Ex #j. K(x) @ j)"
+
+end

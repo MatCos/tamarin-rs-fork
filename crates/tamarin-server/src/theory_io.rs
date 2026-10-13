@@ -75,6 +75,19 @@ pub fn ndc_check() -> bool {
     NDC_CHECK.load(Ordering::Relaxed)
 }
 
+/// The CLI `--auto-sources` switch, captured like [`NDC_CHECK`]: HS's
+/// interactive mode hands `withWebUI` the `closeTheory version
+/// thyLoadOptions` closure (Interactive.hs:135-136), so every web load
+/// closes with the CLI's `autoSources`, OR-ed with the theory's own
+/// `configuration:` block (`configAutoSources`, TheoryLoader.hs:764-765).
+/// `false` until `run_interactive` sets it.
+static AUTO_SOURCES: AtomicBool = AtomicBool::new(false);
+
+/// Set the CLI `--auto-sources` switch [`load_from_source`] applies.
+pub fn set_auto_sources(on: bool) {
+    AUTO_SOURCES.store(on, Ordering::Relaxed);
+}
+
 /// The parser flags every web load parses with — HS `toParserFlags
 /// thyOpts` (TheoryLoader.hs:285-291) inside the same captured
 /// `loadTheory thyLoadOptions` closure as [`NDC_CHECK`] above, so the
@@ -348,6 +361,31 @@ pub fn load_from_source(
         wf_report.extend(extra);
         if derivcheck_timeout > 0 {
             eprintln!("[Theory {}] Derivation checks ended", typed.name);
+        }
+
+        // Auto-sources (HS `closeTheoryWithMaude sign t autoSources`,
+        // TheoryLoader.hs:679), at the point of the close where `run_batch`
+        // applies it: after the derivation checks and the NDC verdicts.  It
+        // rewrites both theories, so the lazily built proof state (GUI) and
+        // the RL API, which re-elaborate `parser_theory`, see the unfolded
+        // rules and the `AUTO_typing` lemma.  A malformed `configuration:`
+        // block is reported where the proof state reads it
+        // (`config_block_options`); here it just does not turn the switch on.
+        let config_auto_sources = parser_theory
+            .configuration
+            .as_deref()
+            .is_some_and(|cfg| tamarin_theory::prove::parse_config_block(cfg).auto_sources);
+        if AUTO_SOURCES.load(Ordering::Relaxed) || config_auto_sources {
+            let cache = ndc_cache
+                .clone()
+                .map(tamarin_theory::constraint::solver::context::IntrRuleCache::from);
+            tamarin_theory::auto_sources::apply_auto_sources(
+                &mut parser_theory,
+                &mut typed,
+                maude.clone(),
+                None,
+                cache.as_ref(),
+            );
         }
     }
 

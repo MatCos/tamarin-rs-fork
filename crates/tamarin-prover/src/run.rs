@@ -444,6 +444,9 @@ fn run_interactive(args: &Args) -> Result<i32, RunError> {
     // `ndcCheck` = `not (--no-ndc)` (TheoryLoader.hs:365-366) into each loaded
     // theory's `_deductionChainCheck`.  Set before the eager load below.
     tamarin_server::theory_io::set_ndc_check(!args.no_ndc);
+    // `--auto-sources` — the same captured `thyLoadOptions`: `closeTheory`
+    // (Interactive.hs:136) closes every web load with it.
+    tamarin_server::theory_io::set_auto_sources(args.auto_sources);
     // `-D/--defines` + `--quit-on-warning` — the rest of `toParserFlags
     // thyOpts` (TheoryLoader.hs:285-291) in that same captured closure, so
     // every web load (startup, upload, reload) evaluates `#ifdef` blocks
