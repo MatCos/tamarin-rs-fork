@@ -66,6 +66,7 @@ pub mod canon;
 pub mod canon_color;
 pub mod canon_fingerprint;
 pub mod canon_graph;
+pub mod check_proof;
 pub mod check_terms;
 pub mod close_rule;
 pub mod constraint;

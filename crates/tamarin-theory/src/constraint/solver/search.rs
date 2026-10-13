@@ -161,6 +161,17 @@ pub fn proof_status(node: &ProofNode) -> ProofStatus {
     s
 }
 
+/// Count proof-tree nodes — the number of `LNode` constructors in the
+/// proof tree.  Each `step` in the proof's textual form (a `simplify` /
+/// `solve(...) case X` / `qed` / `SOLVED` annotation) corresponds to one
+/// ProofNode.  Mirrors HS's `foldProof proofStepSummary` (which sums
+/// `const (Sum 1)` over every ProofStep — ClosedTheory.hs:463-491, see line 484,491 via
+/// `foldProof`, Theory/Proof.hs:358-362).  Used for the batch summary's
+/// "steps" and the RL server's `proofSize`.
+pub fn proof_size(node: &ProofNode) -> usize {
+    1 + node.children.values().map(proof_size).sum::<usize>()
+}
+
 /// HS `proofSystems` (Batch.hs:284-288): every solved constraint system
 /// in the tree, paired with its proof path (the case names from the
 /// root, outermost first).
@@ -1549,6 +1560,20 @@ pub fn candidate_methods(sys: &System, ctx: &ProofContext, depth: usize) -> Vec<
         return vec![ProofMethod::Finished(r)];
     }
     candidate_methods_open(sys, ctx, depth)
+}
+
+/// The methods a user (or the RL agent) can pick at `sys`, best first: HS
+/// `rankProofMethods` as the web handlers use it, i.e.
+/// [`candidate_methods`] filtered by
+/// [`is_applicable_for_display`](crate::constraint::solver::proof_method::is_applicable_for_display)
+/// (`SolveGoal`s are kept without running them; `Simplify` / `Induction`
+/// are dropped when they do nothing).
+pub fn ranked_methods(sys: &System, ctx: &ProofContext, depth: usize) -> Vec<ProofMethod> {
+    use crate::constraint::solver::proof_method::is_applicable_for_display;
+    candidate_methods(sys, ctx, depth)
+        .into_iter()
+        .filter(|m| is_applicable_for_display(ctx, m, sys))
+        .collect()
 }
 
 /// [`candidate_methods`] minus the `stoppingMethod` guard, for callers that

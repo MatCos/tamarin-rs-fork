@@ -8,8 +8,7 @@
 //!   system gives the same token again (this covers every written field,
 //!   including `Fact.annotations`, which `Fact: PartialEq` also ignores);
 //! - the decoded system behaves the same: the same ranked methods (the RL
-//!   server's list: `candidate_methods` filtered by
-//!   `is_applicable_for_display`), and the same cases from every method;
+//!   server's list, `ranked_methods`), and the same cases from every method;
 //! - every ranked method round-trips.
 //!
 //! Only built with the `serde` feature.  Skips without maude only when
@@ -20,10 +19,8 @@
 use std::path::PathBuf;
 
 use tamarin_theory::constraint::solver::context::{CutStrategy, ProofContext};
-use tamarin_theory::constraint::solver::proof_method::{
-    exec_proof_method, is_applicable_for_display, ProofMethod,
-};
-use tamarin_theory::constraint::solver::search::candidate_methods;
+use tamarin_theory::constraint::solver::proof_method::{exec_proof_method, ProofMethod};
+use tamarin_theory::constraint::solver::search::ranked_methods;
 use tamarin_theory::constraint::system::System;
 use tamarin_theory::prove::{build_lemma_proof_context, CliHeuristic};
 use tamarin_theory::system_codec::{
@@ -37,13 +34,6 @@ mod common;
 const MAX_SYSTEMS: usize = 40;
 const MAX_DEPTH: usize = 4;
 const BRANCHES: usize = 2;
-
-fn ranked(ctx: &ProofContext, sys: &System) -> Vec<ProofMethod> {
-    candidate_methods(sys, ctx, 0)
-        .into_iter()
-        .filter(|m| is_applicable_for_display(ctx, m, sys))
-        .collect()
-}
 
 fn sorted_cases(
     ctx: &ProofContext,
@@ -102,9 +92,9 @@ fn walk(rel_path: &str, lemma: &str) {
         let at = format!("{rel_path} {lemma} [{case_path}]");
         let back = round_trip(&sys, &at);
 
-        let methods = ranked(&ctx, &sys);
+        let methods = ranked_methods(&sys, &ctx, 0);
         assert!(
-            ranked(&ctx, &back) == methods,
+            ranked_methods(&back, &ctx, 0) == methods,
             "{at}: ranked methods differ after decode"
         );
         for m in &methods {

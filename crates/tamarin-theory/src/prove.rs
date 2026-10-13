@@ -1221,35 +1221,102 @@ pub fn prove_system_in_session(
     // rationale as `prove_lemma_in_session_mode`.
     let _lemma_user_funs_guard = crate::elaborate::set_user_funs_from_collected(&session.user_funs);
 
-    let theory = &session.theory;
-    let lemma = theory
-        .lookup_lemma(lemma_name)
-        .ok_or_else(|| ProveError::LemmaNotFound(lemma_name.to_string()))?;
-    let lemma_source_kind = lemma_source_kind(lemma);
-
-    // --- Per-lemma ProofContext, mirroring `prove_lemma_in_session_mode`
-    // step for step (see the comments there for the HS citations). ------
-    // `[sources]` lemmas prove against RAW sources (no typing assumptions);
-    // all others fold in every prior `[sources]` lemma — the `source_key`
-    // gate is inside `setup_per_lemma_ctx`.
-    let (mut ctx, source_key) =
-        session.setup_per_lemma_ctx(lemma, lemma_name, lemma_source_kind)?;
-    // Saturate (or restore from the session's refined-source cache) — the
-    // search below always consults source cases, so this is unconditionally
-    // the `will_emit_bare_sorry == false` arm of `prove_lemma_in_session_mode`,
-    // including the delta==0 cache-write gate.
-    let cache_disabled = tamarin_utils::env_gate!("TAM_RS_NO_SOURCE_CACHE");
-    let _cache_hit = session.restore_or_saturate_sources(&mut ctx, source_key, cache_disabled);
-    let force_induction = lemma.attributes.iter().any(|a| {
-        matches!(
-            a,
-            crate::theory::LemmaAttr::UseInduction | crate::theory::LemmaAttr::Sources
-        )
-    });
-    if force_induction {
-        ctx.use_induction = crate::constraint::solver::context::UseInduction::UseInduction;
-    }
+    let ctx = session.lemma_context(lemma_name)?;
     Ok(run_proof_search(&ctx, sys, proof_bound))
+}
+
+impl ProverSession {
+    /// `lemma_name`'s per-lemma `ProofContext`, ready to run proof methods
+    /// on any of the lemma's systems (HS `getProofContext lem thy`, as the
+    /// web handlers use it).  Built exactly as [`prove_lemma_in_session`]
+    /// builds it: same template clone, own fresh counter, sources saturated
+    /// or restored from the session cache, induction forced for
+    /// `[sources]` / `[use_induction]` lemmas.
+    pub fn lemma_context(&self, lemma_name: &str) -> Result<ProofContext, ProveError> {
+        // Callers may run on a thread whose user-fn thread-locals are
+        // empty; see `prove_lemma_in_session_mode`.
+        let _lemma_user_funs_guard =
+            crate::elaborate::set_user_funs_from_collected(&self.user_funs);
+        let lemma = self
+            .theory
+            .lookup_lemma(lemma_name)
+            .ok_or_else(|| ProveError::LemmaNotFound(lemma_name.to_string()))?;
+        let lemma_source_kind = lemma_source_kind(lemma);
+
+        // --- Per-lemma ProofContext, mirroring `prove_lemma_in_session_mode`
+        // step for step (see the comments there for the HS citations). ------
+        // `[sources]` lemmas prove against RAW sources (no typing assumptions);
+        // all others fold in every prior `[sources]` lemma — the `source_key`
+        // gate is inside `setup_per_lemma_ctx`.
+        let (mut ctx, source_key) =
+            self.setup_per_lemma_ctx(lemma, lemma_name, lemma_source_kind)?;
+        // Saturate (or restore from the session's refined-source cache) —
+        // proof methods consult source cases, so this is unconditionally
+        // the `will_emit_bare_sorry == false` arm of
+        // `prove_lemma_in_session_mode`, including the delta==0 cache-write
+        // gate.
+        let cache_disabled = tamarin_utils::env_gate!("TAM_RS_NO_SOURCE_CACHE");
+        let _cache_hit = self.restore_or_saturate_sources(&mut ctx, source_key, cache_disabled);
+        let force_induction = lemma.attributes.iter().any(|a| {
+            matches!(
+                a,
+                crate::theory::LemmaAttr::UseInduction | crate::theory::LemmaAttr::Sources
+            )
+        });
+        if force_induction {
+            ctx.use_induction = crate::constraint::solver::context::UseInduction::UseInduction;
+        }
+        Ok(ctx)
+    }
+
+    /// `lemma_name`'s start system (HS `mkSystem ctxt restrictions
+    /// preItems formula`): the negated lemma formula (for `all-traces`
+    /// lemmas) plus the theory's restrictions and the `[reuse]` lemmas
+    /// declared before it.
+    pub fn lemma_initial_system(
+        &self,
+        lemma_name: &str,
+    ) -> Result<crate::constraint::system::System, ProveError> {
+        let _lemma_user_funs_guard =
+            crate::elaborate::set_user_funs_from_collected(&self.user_funs);
+        let lemma = self
+            .theory
+            .lookup_lemma(lemma_name)
+            .ok_or_else(|| ProveError::LemmaNotFound(lemma_name.to_string()))?;
+        self.initial_system(lemma, lemma_name)
+    }
+
+    /// Body of [`Self::lemma_initial_system`]; the caller has installed the
+    /// user-fn thread-locals.
+    fn initial_system(
+        &self,
+        lemma: &crate::theory::Lemma,
+        lemma_name: &str,
+    ) -> Result<crate::constraint::system::System, ProveError> {
+        let g = formula_to_guarded(&lemma.formula)
+            .map_err(|e| ProveError::Guarded(guard_error_doc(&e, &lemma.formula)))?;
+
+        // Per-lemma source kind, mirroring HS `lemmaSourceKind`
+        // (lib/theory/src/Lemma.hs:38-41):
+        // `[sources]`-tagged lemmas get RawSource, all others RefinedSource.
+        // HS sets `pcSourceKind = lemmaSourceKind l` (ClosedTheory.hs:97-138, see line 102,116)
+        // and `formulaToSystem` stamps it onto the initial system's
+        // `sSourceKind` (CloseRule.hs:167-188, see line 175).
+        let lemma_source_kind = lemma_source_kind(lemma);
+
+        // `[reuse]` lemmas declared BEFORE this one.  Same gather logic as
+        // the pre-session prove_lemma_with_pool_file_heuristic path.
+        let reuse_lemmas = gather_reusable_lemmas(&self.theory, lemma_name, lemma_source_kind)?;
+
+        let tq = match lemma.trace_quantifier {
+            crate::theory::TraceQuantifier::AllTraces => p::TraceQuantifier::AllTraces,
+            crate::theory::TraceQuantifier::ExistsTrace => p::TraceQuantifier::ExistsTrace,
+        };
+        let mut sys =
+            formula_to_system(self.restrictions.clone(), lemma_source_kind, tq, false, &g);
+        sys.insert_lemmas(reuse_lemmas);
+        Ok(sys)
+    }
 }
 
 fn prove_lemma_in_session_mode(
@@ -1284,33 +1351,9 @@ fn prove_lemma_in_session_mode(
         .lookup_lemma(lemma_name)
         .ok_or_else(|| ProveError::LemmaNotFound(lemma_name.to_string()))?;
 
-    let g = formula_to_guarded(&lemma.formula)
-        .map_err(|e| ProveError::Guarded(guard_error_doc(&e, &lemma.formula)))?;
-
-    // Per-lemma source kind, mirroring HS `lemmaSourceKind`
-    // (lib/theory/src/Lemma.hs:38-41):
-    // `[sources]`-tagged lemmas get RawSource, all others RefinedSource.
-    // HS sets `pcSourceKind = lemmaSourceKind l` (ClosedTheory.hs:97-138, see line 102,116)
-    // and `formulaToSystem` stamps it onto the initial system's
-    // `sSourceKind` (CloseRule.hs:167-188, see line 175).
+    // Guarded lemma formula + restrictions + earlier `[reuse]` lemmas.
+    let sys = session.initial_system(lemma, lemma_name)?;
     let lemma_source_kind = lemma_source_kind(lemma);
-
-    // `[reuse]` lemmas declared BEFORE this one.  Same gather logic as
-    // the pre-session prove_lemma_with_pool_file_heuristic path.
-    let reuse_lemmas = gather_reusable_lemmas(theory, lemma_name, lemma_source_kind)?;
-
-    let tq = match lemma.trace_quantifier {
-        crate::theory::TraceQuantifier::AllTraces => p::TraceQuantifier::AllTraces,
-        crate::theory::TraceQuantifier::ExistsTrace => p::TraceQuantifier::ExistsTrace,
-    };
-    let mut sys = formula_to_system(
-        session.restrictions.clone(),
-        lemma_source_kind,
-        tq,
-        false,
-        &g,
-    );
-    sys.insert_lemmas(reuse_lemmas);
 
     if trace {
         eprintln!(

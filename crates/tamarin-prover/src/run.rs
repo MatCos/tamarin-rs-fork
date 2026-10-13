@@ -2024,7 +2024,7 @@ impl TheoryPipeline<'_> {
                 let mut lemma_traces: Vec<(String, System)> = Vec::new();
                 let (verdict, proof_steps, proof_body) = match outcome {
                     Ok(root) => {
-                        let steps = count_proof_steps(&root);
+                        let steps = tamarin_theory::constraint::solver::search::proof_size(&root);
                         // HS lemma verdict = `getProofStatus` (Proof.hs)
                         // folded over the WHOLE tree, NOT the root's
                         // per-node `NodeStatus`.  This matters for
@@ -2908,16 +2908,6 @@ pub fn out_path_for(args: &Args, in_file: &str) -> Option<String> {
         return Some(p.to_string_lossy().to_string());
     }
     None
-}
-
-/// Count proof-tree nodes — the number of `LNode` constructors in the
-/// proof tree.  Each `step` in the proof's textual form (a `simplify` /
-/// `solve(...) case X` / `qed` / `SOLVED` annotation) corresponds to one
-/// ProofNode.  Mirrors HS's `foldProof proofStepSummary` (which sums
-/// `const (Sum 1)` over every ProofStep — ClosedTheory.hs:463-491, see line 484,491 via
-/// `foldProof`, Theory/Proof.hs:358-362).
-fn count_proof_steps(node: &tamarin_theory::constraint::solver::search::ProofNode) -> usize {
-    1 + node.children.values().map(count_proof_steps).sum::<usize>()
 }
 
 fn print_overall_summary(file_results: &[FileResult], prove_mode: bool) {
