@@ -1,6 +1,6 @@
 //! (No HS analog.) The goal strings the RL server shows TamRL's model
 //! (`goal.type`, `goal.args`), printed as the TamRL Haskell fork's
-//! `toJSONGoal` (Constraints.hs) prints them.
+//! `toJSONGoal` prints them.
 //!
 //! The fork changed Tamarin's printers through their parameters and operator
 //! constants: plain-ASCII operators, variables as `name.idx:sort`, fact names

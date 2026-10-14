@@ -141,7 +141,7 @@ fn premise_and_chain_goals_print_node_and_index() {
 /// A fact name starting with `F_` or `L_` is the old way of marking a
 /// solve-first or solve-last fact (the fork's `isSolveFirstFact` /
 /// `isSolveLastFact`). The fork's `showFactTag` drops that prefix
-/// (Theory/Model/Fact.hs:569-578). `!AgentKey(ltkR.0:fresh)` is the fork's
+/// (upstream's does not). `!AgentKey(ltkR.0:fresh)` is the fork's
 /// output for `!F_AgentKey(~ltk)` in csf17/counter-protocol.spthy; the other
 /// cases follow that code.
 #[test]
