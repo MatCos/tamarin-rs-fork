@@ -1570,7 +1570,12 @@ fn gterm_to_doc(t: &crate::guarded::GTerm, scope: &[Vec<Bind>]) -> crate::pretty
             gpair_doc(&flatten_pair_gterms(t), scope)
         }
         App(name, args) => {
-            if args.is_empty() {
+            // Nat-one first, as in `term_to_doc`: a substitution brings it into
+            // a formula as `App("tone", [])` (`lnterm_to_term`), and HS
+            // prints `natOneSym` as "%1" (Term/Term.hs:298-327, see line 312).
+            if args.is_empty() && &**name == "tone" {
+                Doc::text("%1")
+            } else if args.is_empty() {
                 Doc::text(name.clone()) // `FApp (NoEq (f,_)) [] -> text f`
             } else {
                 gfun_doc(name, args, scope)
@@ -2686,6 +2691,8 @@ fn pp_gterm_styled(
         GTerm::App(name, args) if &**name == "pair" && args.len() == 2 => {
             pp_pair_gterm(t, scope, style, out)
         }
+        // Nat-one as reached through a substitution, see `gterm_to_doc`.
+        GTerm::App(name, args) if args.is_empty() && &**name == "tone" => out.push_str("%1"),
         // A 0-arity symbol renders BARE, without an argument list: HS
         // `FApp (NoEq (f, _)) [] -> text (BC.unpack f)` (Term/Term.hs:314)
         // precedes the `ppFun` arm at line 315.  Mirrors `gterm_to_doc`'s

@@ -451,3 +451,31 @@ fn fact_annotations_render_in_ord_order() {
     };
     assert_eq!(fact_to_doc(&fa, &[]).render(), "F( a )[+, no_precomp]");
 }
+
+/// The nat constant 1 that a substitution puts into a formula arrives as
+/// `App("tone", [])` (`lnterm_to_term`; `lnterm_to_parser` gives the same),
+/// not as `GTerm::NatOne`, e.g. WPA2.spthy's `N(1:nat)`. HS prints
+/// `natOneSym` as `%1` either way (Term/Term.hs:298-327, see line 312).
+#[test]
+fn nat_one_from_a_substitution_prints_as_percent_one() {
+    use tamarin_term::function_symbols::nat_one_sym;
+    use tamarin_term::lterm::LNTerm;
+    use tamarin_term::term::f_app_no_eq;
+
+    let one: LNTerm = f_app_no_eq(nat_one_sym(), Vec::new());
+    let g = crate::guarded_types::term_to_gterm_free(&crate::elaborate::lnterm_to_term(&one));
+    assert!(
+        matches!(&g, crate::guarded::GTerm::App(name, args) if &**name == "tone" && args.is_empty())
+    );
+
+    let mut s = String::new();
+    pp_gterm(&g, &[], &mut s);
+    assert_eq!(s, "%1");
+    assert_eq!(gterm_to_doc(&g, &[]).render(), "%1");
+
+    let n = crate::guarded::GTerm::App("N".into(), vec![g].into());
+    let mut s = String::new();
+    pp_gterm(&n, &[], &mut s);
+    assert_eq!(s, "N(%1)");
+    assert_eq!(gterm_to_doc(&n, &[]).render(), "N(%1)");
+}
