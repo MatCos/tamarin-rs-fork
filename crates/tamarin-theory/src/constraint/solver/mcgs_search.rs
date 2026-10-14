@@ -489,6 +489,9 @@ impl<'a> Engine<'a> {
             applied: self.stats.applied,
             leaves: self.stats.leaves,
             merges: self.stats.merges,
+            // No sleep sets.
+            skipped_asleep: 0,
+            asleep: 0,
         }
     }
 

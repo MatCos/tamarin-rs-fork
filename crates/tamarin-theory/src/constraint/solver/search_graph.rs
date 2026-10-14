@@ -551,6 +551,12 @@ pub(crate) struct MergeCounts {
     pub(crate) leaves: u64,
     /// Cases that reached a class created before.
     pub(crate) merges: u64,
+    /// With sleep sets (top-N only): ranked methods skipped because their
+    /// goal slept.
+    pub(crate) skipped_asleep: u64,
+    /// With sleep sets: open classes left without a method because every
+    /// remaining one slept.
+    pub(crate) asleep: u64,
 }
 
 /// Writes `[search-stats]` lines for one search: the same fields for every
@@ -624,8 +630,8 @@ impl StatsReporter {
             .map_or("none".to_string(), |c| format!("{:?}", c.status));
         eprintln!(
             "[search-stats] search={} lemma={} final={} end={} root={} classes={} leaves={} \
-             merges={} shared={} applied={} execs={} canons={} canon_s={:.3} busy_s={:.3} \
-             elapsed_s={:.3}",
+             merges={} shared={} asleep={} skipped_asleep={} applied={} execs={} canons={} \
+             canon_s={:.3} busy_s={:.3} elapsed_s={:.3}",
             self.search,
             lemma,
             u8::from(end.is_some()),
@@ -635,6 +641,8 @@ impl StatsReporter {
             counts.leaves,
             counts.merges,
             shared,
+            counts.asleep,
+            counts.skipped_asleep,
             counts.applied,
             work.execs,
             work.canons,
