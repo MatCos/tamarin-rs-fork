@@ -89,7 +89,7 @@ impl ApiState {
                 .map(|entry| {
                     let theory = ApiTheory {
                         entry,
-                        prover: OnceLock::new(),
+                        prover: Mutex::new(None),
                     };
                     (theory.entry.idx, Arc::new(theory))
                 })
@@ -100,8 +100,10 @@ impl ApiState {
 
 struct ApiTheory {
     entry: TheoryEntry,
-    /// Built by the first lemma request; a failed build stays failed.
-    prover: OnceLock<Result<Arc<Prover>, String>>,
+    /// Built by the first lemma request.  A failed build is not kept: it
+    /// can fail for passing reasons (Maude not starting), and the next
+    /// request tries again.
+    prover: Mutex<Option<Arc<Prover>>>,
 }
 
 struct Prover {
@@ -282,11 +284,15 @@ impl ApiTheory {
         Ok(())
     }
 
+    /// The theory's prover; concurrent first requests wait for one build.
     fn prover(&self, cfg: &ServerConfig) -> ApiResult<Arc<Prover>> {
-        self.prover
-            .get_or_init(|| Prover::build(&self.entry, cfg).map(Arc::new))
-            .clone()
-            .map_err(ApiError::Internal)
+        let mut slot = self.prover.lock();
+        if let Some(prover) = &*slot {
+            return Ok(prover.clone());
+        }
+        let prover = Arc::new(Prover::build(&self.entry, cfg).map_err(ApiError::Internal)?);
+        *slot = Some(prover.clone());
+        Ok(prover)
     }
 }
 

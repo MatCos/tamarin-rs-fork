@@ -302,6 +302,44 @@ async fn a_walked_proof_checks_as_complete() {
     }
 }
 
+/// A theory whose prover could not be built (here: Maude did not start) is
+/// built again by the next request, not refused until a restart.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_build_is_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    if !maude_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("api_rl_retry_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready = dir.join("ready");
+    let script = dir.join("maude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ -e '{}' ] || exit 1\nexec '{}' \"$@\"\n",
+            ready.display(),
+            common::maude_path()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let api_maude = script.display().to_string();
+    let s = common::start_server_with_theory_and("Tutorial.spthy", |cfg| {
+        cfg.maude_path = api_maude;
+    })
+    .await;
+    let url = lemma_url(&s, "Client_auth", "initial-system");
+    let (status, body) = get_json(&s, &url).await;
+    assert_eq!(status, 500, "{body}");
+    std::fs::write(&ready, "").unwrap();
+    let (status, body) = get_json(&s, &url).await;
+    assert_eq!(status, 200, "{body}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A proof 100 steps deep is 200 levels of JSON, beyond serde_json's default
 /// limit of 128.  Only the first `Simplify` applies; the rest are reported
 /// as an invalid step, as the fork does.
