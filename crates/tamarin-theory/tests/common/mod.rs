@@ -98,6 +98,14 @@ pub fn load_theory_with_maude(
     Some((parsed, elaborated, maude))
 }
 
+/// Read and parse `theory_path`, for installing its signature
+/// (`set_user_funs_for_theory`) where no maude is needed.
+#[allow(dead_code)]
+pub fn parse_theory(theory_path: &Path) -> tamarin_parser::ast::Theory {
+    let source = std::fs::read_to_string(theory_path).expect("read theory");
+    tamarin_parser::parse_theory(&source, &[]).expect("parse theory")
+}
+
 #[allow(dead_code)]
 pub fn tutorial_theory_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tamarin-prover/examples/Tutorial.spthy")

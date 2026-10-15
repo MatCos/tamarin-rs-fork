@@ -46,15 +46,11 @@
 //! - [`auto_sources`] ← `OpenTheory` `addAutoSourcesLemma` (`--auto-sources`)
 //! - [`module`] ← `Theory.Module` (the `--output-module` selector)
 //! - [`state_trace`] ← solver state tracing
-//! - [`canon`] ← (no HS analog) lifts `tamarin_term::alpha_eq_ac`'s
-//!   canonization of terms for $\alphaeqac$ to facts and rules, per
-//!   `work.tex`'s "Canonization of Facts and Rule Instances"
-//! - [`canon_graph`] ← (no HS analog) extracts work.tex's graph part
-//!   `gp(Γ) = (V, E, c)` (vertices + structural edges; coloring is a
-//!   later stage) from a constraint `System`, per `work.tex`'s
-//!   "Canonization of Graphs of Rule Instances"
-//! - [`canon_term_graph`] ← (no HS analog) canonicalizes a whole constraint
-//!   `System` through one colored digraph of the system written as a term
+//! - [`canon`] ← (no HS analog) the canonical form of a constraint `System`
+//!   modulo $\alphaeqac$, field by field, per `work.tex`'s "Canonization"
+//!   sections; [`canon_term_graph`] names its variables by canonicalizing
+//!   the whole system as one colored digraph of the system written as a
+//!   term ([`bliss_proc`] runs bliss on it)
 //!
 //! The `.spthy` parser lives in the sibling `tamarin-parser` crate.
 //!
@@ -65,9 +61,7 @@ pub mod atom;
 pub mod auto_sources;
 pub mod bliss_proc;
 pub mod canon;
-pub mod canon_color;
 pub mod canon_fingerprint;
-pub mod canon_graph;
 pub mod canon_term_graph;
 pub mod check_terms;
 pub mod close_rule;

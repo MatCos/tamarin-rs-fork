@@ -8,8 +8,6 @@ use tamarin_term::builtin::{pair, pk, union, xor};
 use tamarin_term::lterm::pub_term;
 
 use crate::bliss_proc::bliss_available;
-use crate::canon::canonicalize_constraint_system;
-use crate::canon_color::ColorTable;
 use crate::constraint::constraints::{Edge, NodeId};
 use crate::constraint::system::GoalStatus;
 use crate::fact::{ku_fact, proto_fact, proto_fact_ann, FactAnnotation, Multiplicity};
@@ -17,7 +15,7 @@ use crate::guarded::formula_to_guarded;
 use crate::rule::{
     ConcIdx, PremIdx, ProtoRuleACInstInfo, ProtoRuleName, Rule, RuleAttributes, RuleInfo,
 };
-use crate::tools::equation_store::{EqDisj, LNSubstVFresh, SplitId};
+use crate::tools::equation_store::{EqDisj, LNSubst, LNSubstVFresh, SplitId};
 
 fn msg(name: &str, idx: u64) -> LVar {
     LVar::new(name, LSort::Msg, idx)
@@ -117,11 +115,6 @@ fn form(sys: &System) -> CanonicalSystem {
 }
 
 // -- The worked example (PLAN.md) ---------------------------------------------
-
-const WORKED_THEORY: &str = "theory T begin\n\
-    rule R1:\n  [ Fr(~k) ] --> [ St(x, ~k) ]\n\
-    rule R2:\n  [ St(x, ~k) ] --[ Fin(x) ]-> [ ]\n\
-    end";
 
 /// Two rule instances joined by an edge, a formula, and an equation-store
 /// disjunction `{x ↦ pk(u1)} ∨ {x ↦ u2 ⊕ v2}`, over the given variables.
@@ -320,8 +313,8 @@ fn which_node_is_last_counts() {
     assert_ne!(form(&with_last(0)), form(&with_last(1)));
 }
 
-/// Two rules with the same facts but different names give different forms
-/// (as in the graph-part form); renaming the variable still merges.
+/// Two rules with the same facts but different names give different forms;
+/// renaming the variable still merges.
 #[test]
 fn which_rule_a_node_instantiates_counts() {
     if !bliss_available() {
@@ -484,6 +477,49 @@ fn store_only_variables_link_disjunctions() {
     assert_ne!(form(&linked), form(&unlinked));
 }
 
+/// The store-only variables `a`, `b` look alike (each occurs once, with a
+/// variable range), but swapping them gives a different store that is
+/// equivalent only via the renaming `a ↔ b`.
+#[test]
+fn symmetric_store_only_variables_get_the_same_form() {
+    if !bliss_available() {
+        return;
+    }
+    let (x, a, b) = (msg("x", 0), msg("x", 4), msg("x", 5));
+    let system = |first: LVar, second: LVar| {
+        let w = v(msg("w", 20));
+        let mut sys = ku_goal_system(vec![v(x)]);
+        set_conj(
+            &mut sys,
+            vec![vec![
+                alt(vec![(x, w.clone()), (first, w.clone())]),
+                alt(vec![(x, pub_term("P")), (second, w)]),
+            ]],
+        );
+        sys
+    };
+    assert_eq!(form(&system(a, b)), form(&system(b, a)));
+}
+
+/// `subst`'s domain variables no longer occur anywhere else once
+/// `substSystem` has applied it; they are free variables all the same.
+#[test]
+fn a_substituted_variable_outside_the_graph_is_named() {
+    if !bliss_available() {
+        return;
+    }
+    let x = msg("x", 0);
+    let system = |gone: LVar| {
+        let mut sys = ku_goal_system(vec![v(x)]);
+        sys.eq_store_mut().subst = LNSubst::from_list(vec![(gone, v(x))]);
+        sys
+    };
+    let (canon, labelling, _) = canon(&system(msg("x", 9)));
+    assert!(labelling.theta().contains_key(&msg("x", 9)));
+    assert_eq!(canon, form(&system(msg("y", 3))));
+    assert_ne!(canon, form(&ku_goal_system(vec![v(x)])));
+}
+
 /// The induction hypothesis puts a free `Last(#v)` into a formula; the term
 /// graph names `#v` like any other free variable.
 #[test]
@@ -509,7 +545,7 @@ fn a_free_node_variable_only_in_a_formula_is_named() {
     );
 }
 
-// -- Regressions of the graph-part driver, on the term graph -------------------
+// -- Ties that only part of the system breaks --------------------------------
 
 /// `!KU(x ⊕ y)` alone cannot tell `x` from `y`; a subterm goal on `x` can.
 /// Swapping the raw indices must not change the form.
@@ -645,27 +681,14 @@ fn a_system_without_free_variables_skips_bliss() {
     assert_ne!(form_true, form_false);
 }
 
-// -- Same equivalence as the graph-part driver ---------------------------------
+// -- Which systems are equal -------------------------------------------------
 
-fn color_table(src: &str) -> ColorTable {
-    let parsed =
-        tamarin_parser::parser::parse_theory(src, &[]).unwrap_or_else(|e| panic!("parse: {e}"));
-    let thy = crate::elaborate::elaborate(&parsed).unwrap_or_else(|e| panic!("elaborate: {e:?}"));
-    let rules: Vec<crate::theory::OpenProtoRule> = thy.rules().cloned().collect();
-    ColorTable::build(
-        &rules,
-        &crate::constraint::solver::context::IntrRuleCache::from(Vec::new()),
-        &BTreeSet::new(),
-    )
-}
-
-/// Over a set of systems, the two drivers merge exactly the same pairs.
+/// Over a set of systems, exactly the renamed copies get the same form.
 #[test]
-fn both_drivers_define_the_same_equivalence() {
+fn exactly_the_renamed_copies_are_equal() {
     if !bliss_available() {
         return;
     }
-    let colors = color_table(WORKED_THEORY);
     let (x, y, z) = (v(msg("x", 0)), v(msg("y", 0)), v(msg("z", 2)));
     let mut systems = vec![
         worked(),
@@ -702,21 +725,15 @@ fn both_drivers_define_the_same_equivalence() {
     };
     systems.push(moved);
 
-    let old: Vec<CanonicalSystem> = systems
-        .iter()
-        .map(|s| canonicalize_constraint_system(s, &colors).expect("graph-part driver"))
-        .collect();
-    let new: Vec<CanonicalSystem> = systems.iter().map(form).collect();
+    let forms: Vec<CanonicalSystem> = systems.iter().map(form).collect();
+    let renamed_copies = [(0, 1), (2, 4), (5, 6)];
     for i in 0..systems.len() {
-        for j in 0..systems.len() {
+        for j in i + 1..systems.len() {
             assert_eq!(
-                old[i] == old[j],
-                new[i] == new[j],
-                "systems {i} and {j}: graph-part says equal = {}, term graph says {}",
-                old[i] == old[j],
-                new[i] == new[j]
+                forms[i] == forms[j],
+                renamed_copies.contains(&(i, j)),
+                "systems {i} and {j}"
             );
         }
     }
-    assert!(new[0] == new[1] && new[5] == new[6] && new[2] == new[4]);
 }

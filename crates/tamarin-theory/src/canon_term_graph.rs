@@ -11,15 +11,11 @@
 //! [`term_to_graph`]), and bliss's canonical labeling of that graph names the
 //! system's variables.
 //!
-//! This is the alternative to the graph-part driver in [`crate::canon`]. That
-//! driver gives bliss only the graph part, whose vertices do not include
-//! variables, so bliss cannot see which vertices share one; its automorphism
-//! group is a supergroup of the system's symmetries, and the driver
-//! minimizes the whole `CanonicalSystem` over every element. Here every free
-//! variable is a vertex with an edge to each of its occurrences, so bliss sees
-//! the whole system, and its canonical labeling is already canonical: an
-//! automorphism of a faithful encoding is a symmetry of the system, so any
-//! labeling bliss picks gives the same result.
+//! Every free variable is a vertex with an edge to each of its occurrences,
+//! so bliss sees the whole system, and its canonical labeling is already
+//! canonical: an automorphism of a faithful encoding is a symmetry of the
+//! system, so any labeling bliss picks gives the same result, and nothing
+//! has to be minimized over the automorphism group.
 //!
 //! **Soundness does not depend on the encoding.** bliss only decides the
 //! variable names (θ). The canonical form is then built from the system
@@ -62,7 +58,7 @@
 //! quantifier's binders (de Bruijn indices refer to their positions).
 //!
 //! **Field audit** (CONVENTIONS rule 3; the same verdicts as the
-//! `CanonicalSystem` the graph-part driver builds):
+//! `CanonicalSystem` built from the system):
 //!
 //! | Field | Term |
 //! |---|---|
@@ -81,9 +77,9 @@
 //! | `next_goal_nr`, `used_sources`, `sources_lemma_universals`, caches | excluded (PLAN.md's field audit) |
 //!
 //! Formulas keep their de Bruijn indices as constants, so a quantifier
-//! block's binder order stays significant, as in the graph-part driver's
-//! form. `Conj`/`Disj` and a quantifier's guards are AC, `=` is C, `em` is C,
-//! the AC binary operators of formula terms (`is_ac_binop`) are AC.
+//! block's binder order stays significant, as in the `CanonicalSystem`.
+//! `Conj`/`Disj` and a quantifier's guards are AC, `=` is C, `em` is C, the
+//! AC binary operators of formula terms (`is_ac_binop`) are AC.
 //!
 //! **Closed subterms** (an `LNTerm`, fact, formula, atom or formula term
 //! without a free variable) become one constant keyed by the fingerprint of
@@ -131,13 +127,12 @@ use tamarin_term::term::Term;
 use tamarin_term::vterm::{var_term, Lit};
 use tamarin_utils::fingerprint::{Fingerprint, FingerprintHasher};
 
-use crate::bliss_proc::{run_bliss_with_stats, to_dimacs, BlissError, Permutation};
+use crate::bliss_proc::{run_bliss_with_stats, to_dimacs, BlissError, Color, Permutation};
 use crate::canon::{
-    canonicalize_system_content_seeded, fact_to_term, fingerprint_atom, fingerprint_gterm,
-    graph_marker, graph_tag, index_marker, rule_id, rule_identity_marker, varspec_to_lvar,
-    CanonicalSystem, RuleId,
+    canonicalize_system_content, fact_to_term, fingerprint_atom, fingerprint_gterm, graph_marker,
+    graph_tag, index_marker, rule_id, rule_identity_marker, varspec_to_lvar, CanonicalSystem,
+    RuleId,
 };
-use crate::canon_color::Color;
 use crate::constraint::constraints::Goal;
 use crate::constraint::system::{Side, SourceKind, System};
 use crate::fact::{FactTag, LNFact};
@@ -246,8 +241,8 @@ pub enum Op {
     GConj,
     GDisj,
     /// A quantifier block: existential or not, and the sort hints of its
-    /// binders in order (spelled as written, as the graph-part driver's form
-    /// keeps them).
+    /// binders in order (spelled as written, as the `CanonicalSystem` keeps
+    /// them).
     GQuant {
         ex: bool,
         sorts: Vec<String>,
@@ -993,6 +988,10 @@ pub fn canonicalize_constraint_system_via_term_graph_with_labelling(
             (position, v)
         })
         .collect();
+
+    // Sort according to bliss' canonical labelling. The tuple (usize, LVar)
+    // sorts on the first entry, which is the Lvar's image, i.e., the canonical
+    // order on its vertex, under the canonical labelling.
     order.sort();
     let mut labelling = CanonLabelling::empty();
     for (_, v) in &order {
@@ -1104,17 +1103,11 @@ fn label_name(key: &VKey) -> String {
     }
 }
 
-/// `sys` renamed by `labelling`, which names every free variable of it.
+/// `sys` renamed by `labelling`, which names every free variable of it: a
+/// variable `system_to_term` missed has no entry, and renaming it panics.
 fn content_under(sys: &System, labelling: &CanonLabelling) -> CanonicalSystem {
     let graph_part = renamed_graph_part_term(sys, labelling.theta());
-    let (canon, extended) = canonicalize_system_content_seeded(sys, labelling, graph_part);
-    assert_eq!(
-        extended.theta().len(),
-        labelling.theta().len(),
-        "the content stage had to name variables the term graph does not contain: \
-         system_to_term misses a field"
-    );
-    canon
+    canonicalize_system_content(sys, labelling, graph_part)
 }
 
 /// The graph part of `sys` renamed by `theta` and sorted: rule instances

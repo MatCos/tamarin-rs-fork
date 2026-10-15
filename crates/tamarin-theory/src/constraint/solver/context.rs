@@ -22,7 +22,6 @@
 
 use tamarin_term::maude_proc::{MaudeHandle, MaudePool};
 
-use crate::canon_color::ColorTable;
 use crate::rule::IntrRuleAC;
 use crate::theory::OpenProtoRule;
 
@@ -117,17 +116,6 @@ pub struct ProofContextShared {
     /// shared [`IntrRuleCache`] handle, so cloning the bundle shares the
     /// rule list instead of copying it.
     pub intruder_rules: IntrRuleCache,
-    /// The theory's vertex-coloring table for $\alphaeqac$
-    /// canonicalization ([`crate::canon_color`]) — built once here,
-    /// alongside `intruder_rules`, from this same `rules`/`intruder_rules`
-    /// pair (see [`ColorTable::build`]'s own doc comment for why it takes
-    /// `&[OpenProtoRule]` + `&IntrRuleCache` rather than `&Theory`: a
-    /// `ProofContext` is exactly the kind of caller that already has
-    /// both on hand). Reused across a whole proof search — every
-    /// `System` reached under this theory is colored with the SAME
-    /// table — rather than rebuilt per `canonicalize_constraint_system`
-    /// call.
-    pub color_table: ColorTable,
     /// Precomputed unique sources — for each fact tag with exactly
     /// one producing rule, we cache the producer name. Lets goal
     /// solving short-circuit candidate enumeration.
@@ -189,7 +177,6 @@ impl Clone for ProofContextShared {
         let state = *self.saturate_state.lock().unwrap();
         ProofContextShared {
             intruder_rules: self.intruder_rules.clone(),
-            color_table: self.color_table.clone(),
             unique_sources: self.unique_sources.clone(),
             is_diff: self.is_diff,
             full_sources: self.full_sources.clone(),
@@ -934,21 +921,6 @@ impl ProofContext {
         Self::new_impl(maude, None, rules, restrictions, &[], Some(intruder_rules))
     }
 
-    /// Extends the color table to the actions `lemmas` mention
-    /// ([`crate::canon_color::formula_action_names`]). A lemma's formula
-    /// reaches the systems of its proof, and a reused or `[sources]` lemma
-    /// those of other proofs, but lemmas never reach the constructor, which
-    /// covers only the rules' and restrictions' actions. Call it right after
-    /// construction, while the shared bundle is still uniquely owned.
-    pub fn cover_lemma_actions(&mut self, lemmas: std::collections::BTreeSet<String>) {
-        let mut actions = crate::canon_color::guarded_action_names(&self.restrictions);
-        actions.extend(lemmas);
-        let table = ColorTable::build(&self.rules, &self.intruder_rules, &actions);
-        std::sync::Arc::get_mut(&mut self.shared)
-            .expect("cover_lemma_actions: the context's shared bundle is uniquely owned")
-            .color_table = table;
-    }
-
     fn new_impl(
         maude: MaudeHandle,
         maude_pool: Option<std::sync::Arc<MaudePool>>,
@@ -1176,18 +1148,6 @@ impl ProofContext {
             .iter()
             .filter(|r| crate::rule::is_destr_rule_info(&r.info))
             .all(|r| crate::rule::is_subterm_rule_info(&r.info));
-        // Built here, once per theory load, from the SAME `rules`/
-        // `intruder_rules` this context itself is about to own -- see
-        // `ColorTable::build`'s own doc comment for why it takes
-        // `&[OpenProtoRule]` + `&IntrRuleCache` rather than `&Theory`.
-        // Must happen before `rules` moves into the struct literal below.
-        // The restrictions' actions are covered here, the lemmas' by
-        // `cover_lemma_actions`.
-        let color_table = ColorTable::build(
-            &rules,
-            &intruder_rules,
-            &crate::canon_color::guarded_action_names(&restrictions),
-        );
         let mut ctx = ProofContext {
             maude,
             maude_pool,
@@ -1205,7 +1165,6 @@ impl ProofContext {
             theory_file: String::new(),
             shared: std::sync::Arc::new(ProofContextShared {
                 intruder_rules,
-                color_table,
                 unique_sources: Vec::new(),
                 is_diff: false,
                 full_sources: Vec::new(),

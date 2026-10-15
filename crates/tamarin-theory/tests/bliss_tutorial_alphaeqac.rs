@@ -11,35 +11,23 @@
 //! "khu") in a DIFFERENT order. They are believed $\alphaeqac$ — same
 //! logical content, different node-id numbering/solve order.
 //!
-//! Deliberately drives `bliss_proc`'s lower-level pipeline
-//! (`graph_part_to_dimacs` + `run_bliss` + `apply_labeling`) instead of
-//! the `canonicalize` convenience wrapper, so this test can inspect
-//! `BlissResult::generators` directly: comparing each system's OWN
-//! bliss-canonical labeling is only a valid $\alphaeqac$ check when the
-//! graph has NO non-trivial automorphism (see `CanonicalGraph`'s own doc
-//! comment — "minimum over automorphisms" is explicitly out of scope for
-//! this stage). Rather than taking that on faith from a comment ("per
-//! manual inspection"), this test asserts `generators.is_empty()` for
-//! BOTH systems, so a future change that introduces symmetry into the
-//! extracted graph (e.g. a new same-colored, interchangeable vertex
-//! pair) fails LOUDLY here instead of silently reporting a false
-//! `CanonicalGraph` mismatch (or worse, a false match) for the wrong
-//! reason.
+//! Deliberately drives the term graph's lower-level pipeline
+//! (`system_to_term` + `term_to_graph` + `to_dimacs` + `run_bliss`) instead
+//! of `canonicalize_constraint_system`, checking the graph layer on its own:
+//! the two systems' term graphs must be isomorphic, i.e. each relabeled by
+//! its own bliss canonical labeling gives the same vertex keys and edges.
+//! `canonicalize_constraint_system_tutorial.rs` checks the canonical forms.
 //!
 //! Skips (via `bliss_available()`'s own panic-unless-opted-out gate) if
 //! `bliss` is not on `PATH`/`$BLISS_PATH` and `TAM_ALLOW_NO_BLISS=1` is
 //! set; otherwise a missing bliss fails loudly rather than reporting a
 //! vacuous green.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tamarin_theory::bliss_proc::{
-    apply_labeling, bliss_available, canonical_edges, canonical_vertex_order, graph_part_to_dimacs,
-    run_bliss,
-};
-use tamarin_theory::canon::canonicalize_graph_part;
-use tamarin_theory::canon_graph::extract_graph_part;
-use tamarin_theory::constraint::solver::context::ProofContext;
+use tamarin_theory::bliss_proc::{bliss_available, run_bliss, to_dimacs};
+use tamarin_theory::canon_term_graph::{system_to_term, term_to_graph, TermGraph, VKey};
 use tamarin_theory::elaborate::set_user_funs_for_theory;
 use tamarin_theory::system_import::system_from_json;
 
@@ -59,103 +47,68 @@ fn load_system(fixture_name: &str) -> tamarin_theory::constraint::system::System
     system_from_json(&json).unwrap_or_else(|e| panic!("system_from_json({fixture_name}): {e}"))
 }
 
+/// `graph` relabeled by its own bliss canonical labeling: the vertex keys in
+/// canonical order and the canonical edges.
+fn canonical_graph(graph: &TermGraph) -> (Vec<VKey>, BTreeSet<(usize, usize)>) {
+    let dimacs = to_dimacs(&graph.colors, &graph.edges).unwrap_or_else(|e| panic!("dimacs: {e}"));
+    let labeling = run_bliss(&dimacs)
+        .unwrap_or_else(|e| panic!("run_bliss: {e}"))
+        .canonical_labeling;
+    let mut keys = vec![None; graph.keys.len()];
+    for (v, key) in graph.keys.iter().enumerate() {
+        keys[labeling.image_of(v)] = Some(key.clone());
+    }
+    let keys = keys
+        .into_iter()
+        .map(|k| k.expect("the labeling is a bijection"))
+        .collect();
+    let edges = graph
+        .edges
+        .iter()
+        .map(|&(s, t)| (labeling.image_of(s), labeling.image_of(t)))
+        .collect();
+    (keys, edges)
+}
+
 #[test]
-fn tutorial_khu_client_and_client_khu_systems_canonicalize_identically() {
+fn tutorial_khu_client_and_client_khu_systems_have_isomorphic_term_graphs() {
     if !bliss_available() {
         return;
     }
-    // Tutorial.spthy declares its own functions (`h`/`aenc`/`adec`/`pk`),
-    // so its real `IntrRuleCache` contains theory-specific Constr/Destr
-    // rules alongside the fixed special ones -- building the `ColorTable`
-    // needs a real maude process, not just an elaborated `Theory` (see
-    // `canon_color.rs`'s own "why this table takes..." doc section). A
-    // `ProofContext` is the natural way to get one: it's the SAME table a
-    // real proof search would use, built once at `ProofContext::new` time
-    // from its own `rules`/`intruder_rules` (`ctx.color_table`).
-    let Some((parsed, elaborated, maude)) =
-        common::load_theory_with_maude(&common::tutorial_theory_path())
-    else {
-        return;
-    };
+    // Reconstructing the systems' terms needs Tutorial.spthy's signature
+    // (`h`/`aenc`/`adec`/`pk`) installed.
+    let parsed = common::parse_theory(&common::tutorial_theory_path());
     let _guard = set_user_funs_for_theory(&parsed);
-    let protocol_rules: Vec<tamarin_theory::theory::OpenProtoRule> =
-        elaborated.rules().cloned().collect();
-    let ctx = ProofContext::new(maude, protocol_rules);
-    let colors = &ctx.color_table;
 
-    let sys_a = load_system("tutorial_khu_client_system.json");
-    let sys_b = load_system("tutorial_client_khu_system.json");
+    let graph_a = term_to_graph(&system_to_term(&load_system(
+        "tutorial_khu_client_system.json",
+    )));
+    let graph_b = term_to_graph(&system_to_term(&load_system(
+        "tutorial_client_khu_system.json",
+    )));
 
-    let part_a = extract_graph_part(&sys_a, colors);
-    let part_b = extract_graph_part(&sys_b, colors);
-
-    // Sanity check before asking bliss anything: if the two graph parts
-    // don't even have the same SHAPE (vertex/edge counts), they cannot
-    // possibly be isomorphic, and the failure is much easier to read
-    // here than as a `CanonicalGraph` mismatch below.
+    // Sanity check before asking bliss anything: graphs of different sizes
+    // cannot be isomorphic, and the failure is easier to read here.
     assert_eq!(
-        part_a.vertices.len(),
-        part_b.vertices.len(),
-        "vertex count mismatch -- the two systems don't even have the same graph SHAPE"
+        graph_a.keys.len(),
+        graph_b.keys.len(),
+        "vertex count mismatch"
     );
     assert_eq!(
-        part_a.edges.len(),
-        part_b.edges.len(),
-        "edge count mismatch -- the two systems don't even have the same graph SHAPE"
+        graph_a.edges.len(),
+        graph_b.edges.len(),
+        "edge count mismatch"
     );
-
-    let dimacs_a =
-        graph_part_to_dimacs(&part_a).unwrap_or_else(|e| panic!("graph_part_to_dimacs a: {e}"));
-    let dimacs_b =
-        graph_part_to_dimacs(&part_b).unwrap_or_else(|e| panic!("graph_part_to_dimacs b: {e}"));
-    let result_a = run_bliss(&dimacs_a).unwrap_or_else(|e| panic!("run_bliss a: {e}"));
-    let result_b = run_bliss(&dimacs_b).unwrap_or_else(|e| panic!("run_bliss b: {e}"));
-
-    // The load-bearing assumption a plain `canonicalize` comparison would
-    // otherwise take on faith: with a non-trivial automorphism group,
-    // each system's own bliss-picked canonical labeling need not agree
-    // with the other's even for truly alphaeqac graphs (bliss's internal
-    // orbit tie-break has no reason to coincide across two differently-
-    // numbered inputs) -- see this file's own module docs.
-    assert!(
-        result_a.generators.is_empty(),
-        "system a's graph part has a non-trivial automorphism group ({} generator(s))",
-        result_a.generators.len()
+    assert_eq!(
+        graph_a.free_vars.len(),
+        graph_b.free_vars.len(),
+        "free variable count mismatch"
     );
-    assert!(
-        result_b.generators.is_empty(),
-        "system b's graph part has a non-trivial automorphism group ({} generator(s))",
-        result_b.generators.len()
-    );
-
-    let canon_a = apply_labeling(&part_a, &result_a.canonical_labeling);
-    let canon_b = apply_labeling(&part_b, &result_b.canonical_labeling);
 
     assert_eq!(
-        canon_a, canon_b,
-        "the two systems' graph parts should be alphaeqac -- same canonical color \
-         multiset and edge structure once each is relabeled by its own bliss \
-         canonical labeling"
-    );
-
-    // The actual production canonical form (see `CanonicalGraph`'s own
-    // doc comment for why the shape check above is only a diagnostic,
-    // not sufficient on its own): put each system's vertices in its OWN
-    // bliss canonical order, keeping full RuleACInst/GFact content this
-    // time (not just colors -- see `canonical_vertex_order`), plus the
-    // matching canonical-position edge set (`canonical_edges`), and
-    // confirm the two systems' full graph parts -- rule instances,
-    // action-formula facts, edges, and less-atoms (which enter the graph
-    // via `LessRelation` vertices/edges, not a separate mechanism) --
-    // canonize to the IDENTICAL term.
-    let ordered_a = canonical_vertex_order(&part_a, &result_a.canonical_labeling);
-    let ordered_b = canonical_vertex_order(&part_b, &result_b.canonical_labeling);
-    let edges_a = canonical_edges(&part_a, &result_a.canonical_labeling);
-    let edges_b = canonical_edges(&part_b, &result_b.canonical_labeling);
-    assert_eq!(
-        canonicalize_graph_part(&ordered_a, &edges_a),
-        canonicalize_graph_part(&ordered_b, &edges_b),
-        "the two systems' full graph parts should canonize to the identical term \
-         once each is walked in its own bliss canonical order"
+        canonical_graph(&graph_a),
+        canonical_graph(&graph_b),
+        "the two systems' term graphs should be isomorphic -- the same keys and \
+         edges once each is relabeled by its own bliss canonical labeling"
     );
 }

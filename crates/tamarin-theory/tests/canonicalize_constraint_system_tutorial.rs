@@ -2,32 +2,24 @@
 // of the tamarin-prover sources this file cites; list them with:
 //   scripts/gen_license_headers.py --authors <this file>
 
-//! End-to-end whole-system canonicalization check (Stage G), against the
-//! same two real captured proof states `bliss_tutorial_alphaeqac.rs`
-//! already validates at the graph-part level:
-//! `examples/tutorial_khu_client_system.json` and
+//! End-to-end whole-system canonicalization check, against the same two
+//! real captured proof states `bliss_tutorial_alphaeqac.rs` validates at
+//! the term-graph level: `examples/tutorial_khu_client_system.json` and
 //! `examples/tutorial_client_khu_system.json` -- two constraint systems
 //! reached by solving the same two goals in a DIFFERENT order, believed
 //! $\alphaeqac$.
 //!
-//! This test drives `canon::canonicalize_constraint_system` -- the Stage G
-//! driver that extends graph-part canonization through
-//! formulas/solved_formulas/lemmas/eq_store/subterm_store -- and asserts
-//! the two systems' full `CanonicalSystem`s are identical, not just their
-//! graph parts. Both fixtures happen to have an empty `eqStore` and
-//! `subtermStore`, so this does NOT exercise `eq_store.conj`'s
-//! per-alternative range-term canonicalization
-//! (`canon::canonicalize_eq_disj_alternative`, fully implemented but only
-//! unit-tested directly so far, not against real captured data -- see
-//! `canon.rs`'s own test module) or a multi-survivor Stage F tie-break
-//! (both systems' graph parts have a trivial automorphism group, per
-//! `bliss_tutorial_alphaeqac.rs`).
+//! Drives `canon::canonicalize_constraint_system` and asserts the two
+//! systems' full `CanonicalSystem`s are identical. Both fixtures happen to
+//! have an empty `eqStore` and `subtermStore`, so this does NOT exercise
+//! `eq_store.conj`'s per-alternative range-term canonicalization (unit-tested
+//! in `canon.rs` and `canon_term_graph_tests.rs`).
 //!
 //! Also fingerprints both `CanonicalSystem`s (`canon_fingerprint`) and
 //! checks the field-by-field match report, not just `CanonicalSystem`'s
 //! own `PartialEq` -- real end-to-end confirmation that fingerprinting a
 //! genuinely $\alphaeqac$ pair of real captured systems reports a full,
-//! all-twelve-fields match, with a much more targeted failure message
+//! all-fields match, with a much more targeted failure message
 //! (which SPECIFIC field(s) diverged) than a bare struct-equality
 //! assertion would give if this pair ever stopped matching.
 //!
@@ -41,7 +33,6 @@ use std::path::PathBuf;
 use tamarin_theory::bliss_proc::bliss_available;
 use tamarin_theory::canon::canonicalize_constraint_system;
 use tamarin_theory::canon_fingerprint::{compare_fingerprints, fingerprint_constraint_system};
-use tamarin_theory::constraint::solver::context::ProofContext;
 use tamarin_theory::elaborate::set_user_funs_for_theory;
 use tamarin_theory::system_import::system_from_json;
 
@@ -67,46 +58,24 @@ fn tutorial_khu_client_and_client_khu_systems_canonicalize_identically_as_whole_
         return;
     }
 
-    // Tutorial.spthy declares its own functions (`h`/`aenc`/`adec`/`pk`),
-    // so its real `IntrRuleCache` contains theory-specific Constr/Destr
-    // rules alongside the fixed special ones -- building the `ColorTable`
-    // `canonicalize_constraint_system` now takes needs a real maude
-    // process, not just an elaborated `Theory` (see `canon_color.rs`'s
-    // own "why this table takes..." doc section). A `ProofContext` is
-    // the natural way to get one: it's the SAME table a real proof
-    // search would use, built once at `ProofContext::new` time from its
-    // own `rules`/`intruder_rules` (`ctx.color_table`).
-    let Some((parsed, elaborated, maude)) =
-        common::load_theory_with_maude(&common::tutorial_theory_path())
-    else {
-        return;
-    };
-    // `canonicalize_constraint_system` -> `extract_graph_part` ->
-    // `collect_action_atoms` -> `gfact_to_fact`/`fact_to_lnfact` needs the
-    // theory's signature installed in the thread-local `USER_FUNS`
-    // context for the whole call -- same requirement
-    // `bliss_tutorial_alphaeqac.rs` documents.
+    // Reconstructing and canonicalizing the systems needs Tutorial.spthy's
+    // signature (`h`/`aenc`/`adec`/`pk`) installed.
+    let parsed = common::parse_theory(&common::tutorial_theory_path());
     let _guard = set_user_funs_for_theory(&parsed);
-    let protocol_rules: Vec<tamarin_theory::theory::OpenProtoRule> =
-        elaborated.rules().cloned().collect();
-    let ctx = ProofContext::new(maude, protocol_rules);
-    let colors = &ctx.color_table;
 
     let sys_a = load_system("tutorial_khu_client_system.json");
     let sys_b = load_system("tutorial_client_khu_system.json");
 
-    let canon_a = canonicalize_constraint_system(&sys_a, colors)
+    let canon_a = canonicalize_constraint_system(&sys_a)
         .unwrap_or_else(|e| panic!("canonicalize_constraint_system(a): {e:?}"));
-    let canon_b = canonicalize_constraint_system(&sys_b, colors)
+    let canon_b = canonicalize_constraint_system(&sys_b)
         .unwrap_or_else(|e| panic!("canonicalize_constraint_system(b): {e:?}"));
 
     assert_eq!(
         canon_a, canon_b,
         "the two systems' full CanonicalSystems (graph part + formulas + \
-         solved_formulas + lemmas + eq_store + subterm_store + \
-         source_kind/side) should be identical -- not just their graph \
-         parts, which `bliss_tutorial_alphaeqac.rs` already confirms \
-         separately"
+         solved_formulas + lemmas + eq_store + subterm_store + goals + \
+         source_kind/side) should be identical"
     );
 
     let fp_a = fingerprint_constraint_system(&canon_a);
@@ -122,22 +91,18 @@ fn tutorial_khu_client_and_client_khu_systems_canonicalize_identically_as_whole_
     );
 }
 
-/// The same pair through the term-graph canonicalizer
-/// (`canon_term_graph`), which needs no color table: equal forms, equal
-/// certificates of the canonical graphs, and every automorphism generator a
-/// symmetry of the system.
+/// The same pair with the term graph's diagnostics: equal certificates of
+/// the canonical graphs, and every automorphism generator a symmetry of the
+/// system.
 #[test]
-fn tutorial_systems_canonicalize_identically_via_the_term_graph() {
+fn tutorial_systems_have_equal_certificates_and_only_genuine_generators() {
     use tamarin_theory::canon_term_graph::{
         canonicalize_constraint_system_via_term_graph_with_labelling, TermGraphOptions,
     };
     if !bliss_available() {
         return;
     }
-    let Some((parsed, _, _)) = common::load_theory_with_maude(&common::tutorial_theory_path())
-    else {
-        return;
-    };
+    let parsed = common::parse_theory(&common::tutorial_theory_path());
     let _guard = set_user_funs_for_theory(&parsed);
     let options = TermGraphOptions {
         check_generators: true,

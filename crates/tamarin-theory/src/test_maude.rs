@@ -108,8 +108,7 @@ mod tests {
     ///   [`SKIPS_SILENTLY`].
     /// - `crates/tamarin-theory/tests/common/mod.rs` — the harness this
     ///   crate's own integration tests use for a real maude-backed
-    ///   `IntrRuleCache`/`ColorTable` (added alongside `canon_color.rs`'s
-    ///   caller-supplies-everything redesign, 2026-09-22).
+    ///   `IntrRuleCache`.
     const ALLOWED: [&str; 9] = [
         "crates/tamarin-prover/tests/common/mod.rs",
         "crates/tamarin-server/src/handlers/proof_tree.rs",

@@ -216,8 +216,7 @@ pub fn top_n_from_env() -> Option<TopNConfig> {
 /// [`top_n_from_env`] for one lemma of a theory, checked against what
 /// merging needs up front rather than at the first canonicalization.
 /// Theories with processes need nothing extra: the prover translates them
-/// before building the proof context, whose color table therefore covers
-/// the generated rules' actions.
+/// before building the proof context.
 pub fn config_for_lemma() -> Option<TopNConfig> {
     let config = top_n_from_env()?;
     if config.merge {

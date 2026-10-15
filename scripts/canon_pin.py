@@ -59,12 +59,12 @@ import sys
 
 # Top-level keys that depend on the machine, the run or where the theory
 # lives, never on what the exploration found. `canon` is the
-# canonicalizers' own measurements, timings included.
+# canonicalizer's own measurements, timings included.
 VOLATILE_TOP = ("timing", "peak_rss_mib", "argv", "theory", "canon")
 # Budgets that stop a run at a machine-dependent point; the gate never
 # passes them, and their values say nothing about the graph. `canon` names
-# the canonicalizer that merged: comparing two of them on the same graphs is
-# what `TAM_RS_CANON=term-graph scripts/canon_pin.sh` does.
+# the canonicalizer that merged in explorers that had two (`--canon`); a
+# base built from such a commit records it, the branch may not.
 VOLATILE_PARAMS = ("time_budget", "max_rss_gb", "setup_timeout", "canon")
 VOLATILE_NODE = ("canon_secs", "methods_secs", "exec_secs")
 
@@ -405,8 +405,8 @@ def selftest():
     checks.append(("volatile fields only", compare(base, other)[0], "SAME"))
 
     other = _doc()
-    other["params"]["canon"] = "term-graph"
-    other["canon"] = {"mode": "term-graph", "primary": {"secs": {"n": 4}}}
+    other["params"]["canon"] = "graph-part"
+    other["canon"] = {"canonicalizations": 4, "secs": {"n": 4}}
     checks.append(("canonicalizer and its measurements", compare(base, other)[0], "SAME"))
 
     other = _doc()

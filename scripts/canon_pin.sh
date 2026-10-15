@@ -234,7 +234,8 @@ run_explorer() {
     t0=$(date +%s.%N)
     ( [ -n "$rundir" ] && cd "$rundir"
       exec env -u PROGRESS -u DUMP_FORMULAS -u PROFILE -u PROFILE_CANON -u DUMP_AUTOMORPHISMS \
-          -u DUMP_DUMMY_SWAPS -u DUMP_DIMACS_AT -u DUMP_CANON_PANIC -u TAM_ALLOW_NO_BLISS \
+          -u DUMP_DUMMY_SWAPS -u DUMP_DIMACS_AT -u DUMP_TERM_GRAPH_AT -u DUMP_CANON_PANIC \
+          -u TAM_RS_CANON -u TAM_ALLOW_NO_BLISS \
           timeout "$TIMEOUT" "$bin" "$farg" "$lemma" $args --max-depth "$DEPTH" \
           --max-nodes "$NODES" --out "$out" "$@" ) >"$log" 2>&1
     rc=$?

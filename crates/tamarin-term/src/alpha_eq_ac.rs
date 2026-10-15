@@ -18,12 +18,12 @@
 //! the canonical labelling is a renaming of variables only. (This deviates
 //! from `work.tex`, which renames names too.)
 //!
-//! This module implements the base, TERM-level case; lifting to facts,
-//! rule instances, guarded formulas, whole graph parts, and finally whole
-//! constraint systems (`tamarin_theory::canon`'s `canonicalize_fact`/
-//! `canonicalize_rule`/`canonicalize_guarded`/`canonicalize_graph_part`/
-//! `canonicalize_constraint_system`) all build on the accumulating
-//! `CanonLabelling`/`canonicalize_alpha_eq_ac_seeded` entry point below.
+//! This module implements the base, TERM-level case. A whole constraint
+//! system is canonicalized in `tamarin_theory::canon`: bliss names its
+//! variables through the system's term graph, the result is a
+//! [`CanonLabelling`], and every field is renamed through it
+//! ([`apply_renaming`]); the `Canonizer` here still canonizes the local
+//! variables of each equation-store alternative.
 use crate::{
     lterm::{HasFrees, LNTerm, LSort, LVar, Name},
     vterm::Lit,
@@ -544,18 +544,16 @@ impl PerSortFresh {
 }
 
 /// An accumulating canonical labelling, threaded across a SEQUENCE of
-/// [`canonicalize_alpha_eq_ac_seeded`] calls (one per graph vertex, in
-/// canonical vertex order -- see `tamarin_theory::canon`'s vertex-level
-/// canonization, which lifts this to facts/rule instances/action-formula
-/// facts). Bundles the winning `theta` -- a renaming of VARIABLES only;
+/// [`canonicalize_alpha_eq_ac_seeded`] or [`CanonLabelling::bind_next`]
+/// calls. Bundles the winning `theta` -- a renaming of VARIABLES only;
 /// names are never renamed (see the module doc) -- with the
 /// [`PerSortFresh`] cursors live at the point it was produced, so later
 /// calls continue allocating canonical indices where earlier ones stopped
 /// instead of reconstructing the cursors from `theta`'s image.
 ///
-/// `Clone` because a caller minimizing over several candidates (e.g. a
-/// future automorphism search) needs each candidate to fork its own
-/// independent accumulator rather than share mutable state.
+/// `Clone` because a caller canonizing several independent scopes (each
+/// equation-store alternative) forks its own accumulator for each rather
+/// than share mutable state.
 #[derive(Debug, Clone, Default)]
 pub struct CanonLabelling {
     theta: BTreeMap<LVar, LVar>,
@@ -589,9 +587,9 @@ impl CanonLabelling {
 
     /// Binds `v` to the next unused canonical variable of its sort and
     /// returns it -- for a variable the caller names in an order it chose
-    /// canonically itself, outside any term the `Canonizer` walks (e.g. the
-    /// equation store's free variables that occur nowhere else, see
-    /// `tamarin_theory::canon`). Panics if `v` is already bound: rebinding
+    /// canonically itself, outside any term the `Canonizer` walks (e.g. in
+    /// the order of their vertices in a canonical term graph, see
+    /// `tamarin_theory::canon_term_graph`). Panics if `v` is already bound: rebinding
     /// would break `theta`'s injectivity.
     pub fn bind_next(&mut self, v: LVar) -> LVar {
         assert!(
@@ -944,8 +942,7 @@ impl Canonizer {
         // Every candidate must rename every variable of the term. Checked
         // here, rather than left to `rename_var`'s panic deep inside
         // `apply_renaming`, so that the message can show the term whose
-        // variable the discovery above missed -- for a constraint system,
-        // its graph-part term. The candidates come from one discovery, so
+        // variable the discovery above missed. The candidates come from one discovery, so
         // the first stands for all.
         term.for_each_free(&mut |v| {
             if let Some(theta) = candidates.first().filter(|theta| !theta.contains_key(v)) {
@@ -1021,11 +1018,9 @@ fn canonical_var(sort: LSort, idx: u64) -> LVar {
 ///
 /// **Panics if `v` is outside `theta`'s domain.** Every caller runs against
 /// an already-exhaustive renaming: [`Canonizer::canonize`] only reaches this
-/// once `next_literals` has run to exhaustion, and `tamarin_theory::canon`'s
-/// Stage G rewrites run strictly AFTER the graph part has discovered and
-/// canonized every variable the system can legitimately contain
-/// (`work.tex`'s guardedness argument), everything past that point being
-/// read-only against an already-exhaustive `theta`. So an uncovered
+/// once `next_literals` has run to exhaustion, and `tamarin_theory::canon`
+/// renames a system only through a `theta` that its term graph built over
+/// every free variable of the system. So an uncovered
 /// variable means an earlier stage failed to discover real system content
 /// -- and passing it through silently would leak its ORIGINAL,
 /// un-canonicalized identity into the "canonical" result, which is
@@ -1062,36 +1057,14 @@ pub fn apply_renaming<T: HasFrees>(theta: &BTreeMap<LVar, LVar>, x: T) -> T {
 /// image; a new literal gets this call's own local permutation tie-break
 /// (the `Canonizer` machinery, unchanged); the winning candidate's
 /// newly-fixed entries and advanced fresh-index cursors are folded back
-/// into `labelling`. This is what lets several terms — e.g. every graph
-/// vertex's own fact, in canonical vertex order — share ONE consistent
-/// labelling: a variable/name common to two different vertices' facts
-/// gets assigned the SAME canonical literal in both, rather than each
-/// term being canonized in isolation (see `tamarin_theory::canon`'s
-/// `canonicalize_fact_seeded`/`canonicalize_rule_seeded`/
-/// `canonicalize_action_fact_seeded`, which lift this to facts/rules/
-/// action-formula facts the same way `canonicalize_fact`/
-/// `canonicalize_rule` already lift the non-accumulating
-/// [`canonicalize_alpha_eq_ac`]).
+/// into `labelling`. This is what lets several terms share ONE consistent
+/// labelling: a variable common to two of them gets the SAME canonical
+/// literal in both, rather than each term being canonized in isolation.
 pub fn canonicalize_alpha_eq_ac_seeded(t: &LNTerm, labelling: &mut CanonLabelling) -> LNTerm {
     let mut c = Canonizer::new_with_labelling(t, std::mem::take(labelling));
     let (canon_term, updated) = c.canonize();
     *labelling = updated;
     canon_term
-}
-
-/// [`canonicalize_alpha_eq_ac_seeded`], returning EVERY extension of
-/// `labelling` that produces the canonical term instead of only the first.
-/// There is more than one exactly when `t` has a renaming symmetry fixing
-/// `labelling`'s variables (e.g. `x ⊕ y` with `x`, `y` new); the first is
-/// the one [`canonicalize_alpha_eq_ac_seeded`] keeps, and which one that is
-/// depends on raw variable order. A caller that uses the labelling beyond
-/// `t` -- to rename other content consistently with it -- must minimize
-/// over all of them for its result to be canonical.
-pub fn canonicalize_alpha_eq_ac_seeded_all(
-    t: &LNTerm,
-    labelling: &CanonLabelling,
-) -> (LNTerm, Vec<CanonLabelling>) {
-    Canonizer::new_with_labelling(t, labelling.clone()).canonize_all()
 }
 
 /// Canonize `t` with respect to $\alphaeqac$: two terms are $\alphaeqac$ iff
@@ -1142,7 +1115,7 @@ mod tests {
     // -- A variable deeper than its AC siblings (`position::collect_positions`).
 
     /// Top-3 search with merging on `sp14/group_joux.spthy` reached a
-    /// system whose graph-part term contains
+    /// system whose term contains
     /// `x ++ <indA, A> ++ <indA.1, A> ++ <(indB ++ indA.1), B>`, and `indB`
     /// never got a canonical name. The trigger is not the nested union: two
     /// arguments of an AC symbol with the same head (`f`, or the pair), one
@@ -1281,46 +1254,6 @@ mod tests {
             arg_of(&c2),
             "the variable shared between t1 and t2 must canonize to the identical literal in both"
         );
-    }
-
-    /// `x ⊕ y` cannot tell `x` from `y`: both namings produce the canonical
-    /// term, and the first is the one `canonicalize_alpha_eq_ac_seeded`
-    /// keeps.
-    #[test]
-    fn seeded_all_returns_every_tied_labelling() {
-        let (x, y) = (LVar::new("x", LSort::Msg, 5), LVar::new("y", LSort::Msg, 7));
-        let t = xor(var_term(x), var_term(y));
-
-        let (canon, winners) = canonicalize_alpha_eq_ac_seeded_all(&t, &CanonLabelling::empty());
-
-        assert_eq!(winners.len(), 2);
-        assert_ne!(winners[0].theta(), winners[1].theta());
-        for w in &winners {
-            assert_eq!(apply_renaming(w.theta(), t.clone()), canon);
-        }
-        let mut first = CanonLabelling::empty();
-        assert_eq!(canonicalize_alpha_eq_ac_seeded(&t, &mut first), canon);
-        assert_eq!(first.theta(), winners[0].theta());
-    }
-
-    /// Without a renaming symmetry there is exactly one winner. A seeded
-    /// variable is never renamed, so fixing `x` leaves `x ⊕ y` a single
-    /// naming for `y`.
-    #[test]
-    fn seeded_all_returns_one_labelling_without_a_symmetry() {
-        let (x, y) = (LVar::new("x", LSort::Msg, 5), LVar::new("y", LSort::Msg, 7));
-        let (_, winners) = canonicalize_alpha_eq_ac_seeded_all(
-            &f_app_no_eq(no_eq_sym("f", 2), vec![var_term(x), var_term(y)]),
-            &CanonLabelling::empty(),
-        );
-        assert_eq!(winners.len(), 1);
-
-        let mut seeded = CanonLabelling::empty();
-        canonicalize_alpha_eq_ac_seeded(&var_term(x), &mut seeded);
-        let (_, winners) =
-            canonicalize_alpha_eq_ac_seeded_all(&xor(var_term(x), var_term(y)), &seeded);
-        assert_eq!(winners.len(), 1);
-        assert_eq!(winners[0].theta()[&x], seeded.theta()[&x]);
     }
 
     /// Names are never scheduled for renaming: the worklist only ever

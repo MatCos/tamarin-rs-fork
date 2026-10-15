@@ -27,9 +27,7 @@ use tamarin_term::alpha_eq_ac::CanonLabelling;
 use tamarin_term::fingerprint::Fingerprint;
 use tamarin_utils::FastMap;
 
-use crate::canon::{
-    canonicalize_constraint_system_with_labelling_in, canonicalize_proof_method, CanonMode,
-};
+use crate::canon::{canonicalize_constraint_system_with_labelling, canonicalize_proof_method};
 use crate::canon_fingerprint::{
     fingerprint_constraint_system, fingerprint_proof_method, CanonicalSystemFingerprint,
 };
@@ -633,7 +631,7 @@ impl StatsReporter {
         eprintln!(
             "[search-stats] search={} lemma={} final={} end={} root={} classes={} leaves={} \
              merges={} shared={} asleep={} skipped_asleep={} applied={} execs={} canons={} \
-             canon_s={:.3} busy_s={:.3} elapsed_s={:.3} canon={}",
+             canon_s={:.3} busy_s={:.3} elapsed_s={:.3}",
             self.search,
             lemma,
             u8::from(end.is_some()),
@@ -651,7 +649,6 @@ impl StatsReporter {
             work.canon_time.as_secs_f64(),
             work.busy.as_secs_f64(),
             self.started.elapsed().as_secs_f64(),
-            CanonMode::from_env().name(),
         );
     }
 }
@@ -704,17 +701,12 @@ impl WorkerEnv {
 }
 
 pub(crate) fn canonical_key(
-    ctx: &ProofContext,
     sys: &System,
     work: &mut WorkStats,
 ) -> (CanonicalSystemFingerprint, CanonLabelling) {
     let start = Instant::now();
-    let (canon, labelling) = canonicalize_constraint_system_with_labelling_in(
-        CanonMode::from_env(),
-        sys,
-        &ctx.color_table,
-    )
-    .unwrap_or_else(|e| panic!("TAM_RS_MERGE: canonicalizing a constraint system failed: {e}"));
+    let (canon, labelling) = canonicalize_constraint_system_with_labelling(sys)
+        .unwrap_or_else(|e| panic!("TAM_RS_MERGE: canonicalizing a constraint system failed: {e}"));
     let key = fingerprint_constraint_system(&canon);
     work.canons += 1;
     work.canon_time += start.elapsed();
@@ -732,7 +724,7 @@ pub(crate) fn classify(
         return Child::Finished(Settled::of(&result));
     }
     if merge {
-        let (key, labelling) = canonical_key(ctx, &sys, work);
+        let (key, labelling) = canonical_key(&sys, work);
         Child::Keyed(key, Stored::new(sys, Some(labelling)))
     } else {
         Child::Unkeyed(Stored::new(sys, None))
@@ -886,7 +878,7 @@ impl<X: Default + Sync> Materializer<'_, X> {
             let class = known.expect("merging off: the class of a case comes from the graph");
             return Resolved::Class(sys, None, class);
         }
-        let (key, labelling) = canonical_key(ctx, &sys, &mut WorkStats::default());
+        let (key, labelling) = canonical_key(&sys, &mut WorkStats::default());
         let class = *self.graph.by_key.get(&key).unwrap_or_else(|| {
             panic!("materializing the proof: a case reaches a system the search never saw")
         });
