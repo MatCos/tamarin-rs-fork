@@ -302,6 +302,40 @@ async fn a_walked_proof_checks_as_complete() {
     }
 }
 
+/// A proof 100 steps deep is 200 levels of JSON, beyond serde_json's default
+/// limit of 128.  Only the first `Simplify` applies; the rest are reported
+/// as an invalid step, as the fork does.
+#[tokio::test(flavor = "multi_thread")]
+async fn deep_proofs_are_accepted() {
+    if !maude_available() {
+        return;
+    }
+    let s = start_server_with_theory("Tutorial.spthy").await;
+    let sys = initial(&s, "Client_auth").await;
+    let simplify = sys["proofMethods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|m| m["name"] == "Simplify")
+        .unwrap();
+    let mut tree = json!({"action": "contradictory", "children": {}});
+    for _ in 0..100 {
+        tree = json!({"action": sys["encodedMethods"][simplify], "children": {"": tree}});
+    }
+    let proof = serde_json::to_string(&tree).unwrap();
+    let url = lemma_url(&s, "Client_auth", "check-proof");
+    let (status, body) = post_form(&s, &url, &[("proof", &proof)]).await;
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        body["proofFile"]
+            .as_str()
+            .unwrap()
+            .contains("invalid proof step encountered"),
+        "{body}"
+    );
+}
+
 /// Parallel requests must give the same bytes as the same requests one at a
 /// time: each runs on its own Maude process with its own fresh-variable
 /// counter, so nothing one request does can leak into another.

@@ -462,14 +462,26 @@ fn lvar_json(v: &LVar) -> Value {
 /// fork accepts both).
 fn proof_object(text: &str) -> std::result::Result<Map<String, Value>, String> {
     const SHAPE: &str = "expected proof to be a JSON object or a JSON-encoded object string";
-    match serde_json::from_str(text).map_err(|e| e.to_string())? {
+    match parse_json(text)? {
         Value::Object(obj) => Ok(obj),
-        Value::String(inner) => match serde_json::from_str(&inner).map_err(|e| e.to_string())? {
+        Value::String(inner) => match parse_json(&inner)? {
             Value::Object(obj) => Ok(obj),
             _ => Err(SHAPE.into()),
         },
         _ => Err(SHAPE.into()),
     }
+}
+
+/// `serde_json::from_str` without its nesting limit of 128: every proof
+/// step nests two levels (the node and its `children`), so the limit would
+/// refuse proofs deeper than 63 steps.  The fork's parser has no limit.
+fn parse_json(text: &str) -> std::result::Result<Value, String> {
+    use serde::Deserialize;
+    let mut de = serde_json::Deserializer::from_str(text);
+    de.disable_recursion_limit();
+    let value = Value::deserialize(&mut de).map_err(|e| e.to_string())?;
+    de.end().map_err(|e| e.to_string())?;
+    Ok(value)
 }
 
 /// The fork's `jsonToProof`, with its error messages.

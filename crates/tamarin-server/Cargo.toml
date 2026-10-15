@@ -32,7 +32,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 # The JSON API for the TamRL reinforcement-learning client (`/api/v1`).
-rl = ["tamarin-theory/serde"]
+# `unbounded_depth`: `check-proof` parses proof trees of any depth.
+rl = ["tamarin-theory/serde", "serde_json/unbounded_depth"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
