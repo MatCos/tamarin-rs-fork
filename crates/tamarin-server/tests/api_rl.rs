@@ -107,31 +107,16 @@ async fn errors_follow_the_fork() {
     }
     let s = start_server_with_theory("Tutorial.spthy").await;
 
-    let res = s
-        .client
-        .get(s.url("/api/v1/theories/7/lemmas/Client_auth/initial-system"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 404);
-    assert_eq!(
-        res.json::<Value>().await.unwrap(),
-        json!({"message": "Not Found"})
-    );
-    let res = s.client.get(s.url("/api/v1/nothing")).send().await.unwrap();
-    assert_eq!(res.status(), 404);
+    let url = s.url("/api/v1/theories/7/lemmas/Client_auth/initial-system");
+    let (status, body) = get_json(&s, &url).await;
+    assert_eq!(status, 404);
+    assert_eq!(body, json!({"message": "Not Found"}));
+    let (status, _) = get_json(&s, &s.url("/api/v1/nothing")).await;
+    assert_eq!(status, 404);
 
-    let res = s
-        .client
-        .get(lemma_url(&s, "no_such_lemma", "initial-system"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 400);
-    assert_eq!(
-        errors(&res.text().await.unwrap()),
-        json!(["Lemma not found"])
-    );
+    let (status, body) = get_json(&s, &lemma_url(&s, "no_such_lemma", "initial-system")).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["errors"], json!(["Lemma not found"]));
 
     let url = lemma_url(&s, "Client_auth", "execute");
     let (status, body) = post_form(&s, &url, &[("system", "x")]).await;
@@ -209,15 +194,10 @@ async fn sapic_theories_are_refused() {
         return;
     }
     let s = start_server_with_theory("sapic_else_branch_exp.spthy").await;
-    let res = s
-        .client
-        .get(lemma_url(&s, "any", "initial-system"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 400);
+    let (status, body) = get_json(&s, &lemma_url(&s, "any", "initial-system")).await;
+    assert_eq!(status, 400);
     assert_eq!(
-        errors(&res.text().await.unwrap()),
+        body["errors"],
         json!(["SAPIC theories are not supported by this API"])
     );
 }
