@@ -68,7 +68,9 @@
 //!   1 (`static unsigned int verbose_level = 1;`, `src/bliss.cc`), which
 //!   interleaves human-readable statistics into stdout — without
 //!   `-v=0` the output would not even be reliably line-parseable as
-//!   just `Generator:`/`Canonical labeling:` lines.
+//!   just `Generator:`/`Canonical labeling:` lines. [`run_bliss_with_stats`]
+//!   wants those statistics (`|Aut|`, search nodes), so it runs with `-v=1`
+//!   and picks lines by prefix instead.
 //! - **Duplicate edges / self-loops cannot arise from a `GraphPart`.**
 //!   Every edge in a `GraphPart` has at least one endpoint that is a
 //!   freshly-allocated relation vertex (`canon_graph::push_relation`
@@ -344,16 +346,30 @@ pub fn generate_group(generators: &[Permutation], n: usize) -> Vec<Permutation> 
 /// canonical order independent of the INPUT order (see the module
 /// docs' caveat list).
 pub fn graph_part_to_dimacs(part: &GraphPart) -> Result<String, BlissError> {
-    if part.vertices.is_empty() {
+    assert_eq!(
+        part.colors.len(),
+        part.vertices.len(),
+        "graph_part_to_dimacs: every vertex needs exactly one color"
+    );
+    let edges: Vec<(usize, usize)> = part.edges.iter().map(|e| (e.src, e.tgt)).collect();
+    to_dimacs(&part.colors, &edges)
+}
+
+/// Renders a colored digraph -- vertex `i` has color `colors[i]`, `edges`
+/// are `(src, tgt)` pairs of 0-based vertex indices -- as bliss's
+/// DIMACS-like input (see the module docs). bliss drops duplicate edges, so
+/// a caller must not rely on edge multiplicity.
+pub fn to_dimacs(colors: &[Color], edges: &[(usize, usize)]) -> Result<String, BlissError> {
+    if colors.is_empty() {
         return Err(BlissError::EmptyGraph);
     }
     let mut out = String::new();
-    writeln!(out, "p edge {} {}", part.vertices.len(), part.edges.len()).ok();
-    for idx in 0..part.vertices.len() {
-        writeln!(out, "n {} {}", idx + 1, part.vertex_color(idx)).ok();
+    writeln!(out, "p edge {} {}", colors.len(), edges.len()).ok();
+    for (idx, color) in colors.iter().enumerate() {
+        writeln!(out, "n {} {}", idx + 1, color).ok();
     }
-    for e in &part.edges {
-        writeln!(out, "e {} {}", e.src + 1, e.tgt + 1).ok();
+    for (src, tgt) in edges {
+        writeln!(out, "e {} {}", src + 1, tgt + 1).ok();
     }
     Ok(out)
 }
@@ -383,10 +399,73 @@ pub struct BlissResult {
 /// built.
 pub fn run_bliss(dimacs_input: &str) -> Result<BlissResult, BlissError> {
     let n = parse_vertex_count(dimacs_input)?;
+    let stdout = run_bliss_process(dimacs_input, "-v=0")?;
+    parse_bliss_stdout(&stdout, n)
+}
+
+/// bliss's own search statistics for one run (its `-v=1` summary).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlissStats {
+    /// `|Aut|` exactly as bliss prints it: an integer that can be far
+    /// beyond `u64` (k interchangeable sessions give k!).
+    pub aut_size: String,
+    /// Nodes of bliss's search tree -- its own measure of the work done.
+    pub search_nodes: u64,
+    pub generators: u64,
+    pub max_level: u64,
+}
+
+impl BlissStats {
+    /// `|Aut|` as a float, for statistics (exact up to 2^53).
+    pub fn aut_size_f64(&self) -> f64 {
+        self.aut_size.parse().unwrap_or(f64::NAN)
+    }
+}
+
+/// [`run_bliss`], also returning bliss's search statistics: runs
+/// `bliss -directed -can -v=1`, whose summary lines follow the
+/// `Generator:`/`Canonical labeling:` lines on stdout.
+pub fn run_bliss_with_stats(dimacs_input: &str) -> Result<(BlissResult, BlissStats), BlissError> {
+    let n = parse_vertex_count(dimacs_input)?;
+    let stdout = run_bliss_process(dimacs_input, "-v=1")?;
+    let mut stats = BlissStats::default();
+    let mut result_lines = String::new();
+    for line in stdout.lines() {
+        let number = |rest: &str| -> Result<u64, BlissError> {
+            rest.trim().parse().map_err(|e| {
+                BlissError::Parse(format!("bad number in bliss stats line {line:?}: {e}"))
+            })
+        };
+        if let Some(rest) = line.strip_prefix("|Aut|:") {
+            stats.aut_size = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("Nodes:") {
+            stats.search_nodes = number(rest)?;
+        } else if let Some(rest) = line.strip_prefix("Generators:") {
+            stats.generators = number(rest)?;
+        } else if let Some(rest) = line.strip_prefix("Max level:") {
+            stats.max_level = number(rest)?;
+        } else if line.starts_with("Generator: ") || line.starts_with("Canonical labeling: ") {
+            result_lines.push_str(line);
+            result_lines.push('\n');
+        }
+        // Every other line is a statistic not recorded here (leaf and bad
+        // nodes, canonical-representative updates, total time).
+    }
+    if stats.aut_size.is_empty() {
+        return Err(BlissError::Parse(format!(
+            "no '|Aut|:' line in bliss -v=1 output: {stdout:?}"
+        )));
+    }
+    Ok((parse_bliss_stdout(&result_lines, n)?, stats))
+}
+
+/// Runs `bliss -directed -can <verbosity>` on `dimacs_input`, returning its
+/// stdout.
+fn run_bliss_process(dimacs_input: &str, verbosity: &str) -> Result<String, BlissError> {
     let bin = bliss_binary();
 
     let mut child = Command::new(&bin)
-        .args(["-directed", "-can", "-v=0"])
+        .args(["-directed", "-can", verbosity])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -395,11 +474,9 @@ pub fn run_bliss(dimacs_input: &str) -> Result<BlissResult, BlissError> {
 
     {
         // Scoped so the `ChildStdin` is dropped (closing the pipe) before
-        // `wait_with_output` blocks reading stdout -- bliss reads all of
-        // stdin before writing anything, so writing everything up front
-        // (no threaded stdin/stdout interleaving) cannot deadlock for the
-        // graph sizes this module is actually fed (well under a pipe
-        // buffer's worth of bytes).
+        // `wait_with_output` reads stdout. Writing the whole input before
+        // reading anything cannot deadlock even when it exceeds a pipe
+        // buffer: bliss reads all of stdin before it writes anything.
         let stdin = child.stdin.as_mut().expect("piped stdin");
         stdin
             .write_all(dimacs_input.as_bytes())
@@ -413,8 +490,7 @@ pub fn run_bliss(dimacs_input: &str) -> Result<BlissResult, BlissError> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-
-    parse_bliss_stdout(&String::from_utf8_lossy(&output.stdout), n)
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn parse_vertex_count(dimacs_input: &str) -> Result<usize, BlissError> {
@@ -720,6 +796,35 @@ mod tests {
     /// `{id, g}` -- the group is already closed by construction, so this
     /// mainly pins that `generate_group` doesn't do anything strange for
     /// the simplest possible non-trivial case.
+    /// `-v=1` adds bliss's statistics without changing the result, and
+    /// `|Aut|` is kept exactly even far beyond `u64` (25 interchangeable
+    /// vertices give 25!).
+    #[test]
+    fn run_bliss_with_stats_reports_the_group_size() {
+        if !bliss_available() {
+            return;
+        }
+        let triangle = "p edge 3 3\nn 1 0\nn 2 0\nn 3 0\ne 1 2\ne 2 3\ne 3 1\n";
+        let (result, stats) = run_bliss_with_stats(triangle).expect("run_bliss_with_stats");
+        assert_eq!(result, run_bliss(triangle).expect("run_bliss"));
+        assert_eq!(
+            stats.aut_size, "3",
+            "a directed triangle has exactly its 3 rotations"
+        );
+        assert_eq!(stats.generators, result.generators.len() as u64);
+
+        let colors = vec![0; 25];
+        let (_, stats) =
+            run_bliss_with_stats(&to_dimacs(&colors, &[]).expect("dimacs")).expect("run");
+        assert_eq!(stats.aut_size, "15511210043330985984000000");
+        assert!((stats.aut_size_f64() - 1.5511210043330986e25).abs() < 1e12);
+    }
+
+    #[test]
+    fn to_dimacs_rejects_an_empty_graph() {
+        assert!(matches!(to_dimacs(&[], &[]), Err(BlissError::EmptyGraph)));
+    }
+
     #[test]
     fn generate_group_closes_a_single_transposition() {
         let swap_2_3 = Permutation::from_cycle_notation("(3,4)", 4).unwrap();

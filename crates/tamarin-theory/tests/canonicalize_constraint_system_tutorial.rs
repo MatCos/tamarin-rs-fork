@@ -121,3 +121,38 @@ fn tutorial_khu_client_and_client_khu_systems_canonicalize_identically_as_whole_
         report.mismatched_fields()
     );
 }
+
+/// The same pair through the term-graph canonicalizer
+/// (`canon_term_graph`), which needs no color table: equal forms, equal
+/// certificates of the canonical graphs, and every automorphism generator a
+/// symmetry of the system.
+#[test]
+fn tutorial_systems_canonicalize_identically_via_the_term_graph() {
+    use tamarin_theory::canon_term_graph::{
+        canonicalize_constraint_system_via_term_graph_with_labelling, TermGraphOptions,
+    };
+    if !bliss_available() {
+        return;
+    }
+    let Some((parsed, _, _)) = common::load_theory_with_maude(&common::tutorial_theory_path())
+    else {
+        return;
+    };
+    let _guard = set_user_funs_for_theory(&parsed);
+    let options = TermGraphOptions {
+        check_generators: true,
+        certificate: true,
+    };
+    let canon = |name: &str| {
+        canonicalize_constraint_system_via_term_graph_with_labelling(&load_system(name), options)
+            .unwrap_or_else(|e| panic!("term-graph canonicalization of {name}: {e:?}"))
+    };
+    let (form_a, _, stats_a) = canon("tutorial_khu_client_system.json");
+    let (form_b, _, stats_b) = canon("tutorial_client_khu_system.json");
+    assert_eq!(form_a, form_b);
+    assert_eq!(stats_a.certificate, stats_b.certificate);
+    assert_eq!(
+        stats_a.non_genuine_generators + stats_b.non_genuine_generators,
+        0
+    );
+}

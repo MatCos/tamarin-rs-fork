@@ -53,6 +53,8 @@
 //!   `gp(Γ) = (V, E, c)` (vertices + structural edges; coloring is a
 //!   later stage) from a constraint `System`, per `work.tex`'s
 //!   "Canonization of Graphs of Rule Instances"
+//! - [`canon_term_graph`] ← (no HS analog) canonicalizes a whole constraint
+//!   `System` through one colored digraph of the system written as a term
 //!
 //! The `.spthy` parser lives in the sibling `tamarin-parser` crate.
 //!
@@ -66,6 +68,7 @@ pub mod canon;
 pub mod canon_color;
 pub mod canon_fingerprint;
 pub mod canon_graph;
+pub mod canon_term_graph;
 pub mod check_terms;
 pub mod close_rule;
 pub mod constraint;

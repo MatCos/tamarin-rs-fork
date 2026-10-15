@@ -47,12 +47,14 @@
 //! constraint systems, with the comment "Crucial: rule.new_vars EXCLUDED
 //! per `compareRulesUpToNewVars`."
 //!
-//! `info: I` is intentionally NOT part of the lifted term either, mirroring
+//! `info: I` is not part of the lifted rule term either, mirroring
 //! `Rule<I>`'s own `HasFrees` impl (`rule.rs`): the generic bound is
-//! `Clone`, not a to-term conversion, so this does not by itself distinguish
-//! rules that differ only in name/info — callers who need that (e.g. two
-//! differently-named rules should never be treated as $\alphaeqac$) must
-//! compare `info` separately.
+//! `Clone`, not a to-term conversion. A rule INSTANCE of a constraint system
+//! is lifted with its rule's identity next to it ([`rule_identity_marker`]):
+//! two instances of differently named rules with the same facts are
+//! different proof-search states, since a proof names the rule it uses and
+//! rule names can enter the ranking (oracles, tactics). SAPIC produces such
+//! pairs (`sapic/fast/basic/channels1`'s `incx_1_121` and `incx_3_121`).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -67,7 +69,7 @@ use tamarin_term::term::f_app_list;
 
 use crate::canon_graph::VertexKind;
 use crate::fact::{FactTag, LNFact};
-use crate::rule::{ConcIdx, PremIdx, Rule};
+use crate::rule::{ConcIdx, IntrRuleACInfo, PremIdx, ProtoRuleName, Rule, RuleACInst, RuleInfo};
 
 /// A NUL-prefixed marker name for `tag`, distinct for every distinct
 /// `FactTag` (the variant name is baked into the string, so e.g. a
@@ -144,6 +146,34 @@ pub fn rule_to_term<I>(rule: &Rule<I>) -> LNTerm {
         facts_to_term(&rule.actions),
         facts_to_term(&rule.conclusions),
     ])
+}
+
+/// A rule's identity: what tells two rule instances with the same facts
+/// apart. Intruder rules carry their full info, as in the coloring
+/// (`ColorTable::rule_color`), so a protocol rule named like an intruder rule
+/// never collides with it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuleId {
+    Fresh,
+    Proto(&'static str),
+    Intr(IntrRuleACInfo),
+}
+
+/// The identity of `ru`'s rule.
+pub fn rule_id(ru: &RuleACInst) -> RuleId {
+    match &ru.info {
+        RuleInfo::Proto(p) => match p.name {
+            ProtoRuleName::Fresh => RuleId::Fresh,
+            ProtoRuleName::Stand(s) => RuleId::Proto(s),
+        },
+        RuleInfo::Intr(info) => RuleId::Intr(info.clone()),
+    }
+}
+
+/// A 0-ary marker naming `ru`'s rule ([`rule_id`]), lifted next to a rule
+/// instance's content (see the module docs).
+pub fn rule_identity_marker(ru: &RuleACInst) -> LNTerm {
+    graph_marker(&format!("rule:{:?}", rule_id(ru)))
 }
 
 /// Canonizes a rule w.r.t. $\alphaeqac$ (see [`rule_to_term`]).
@@ -227,7 +257,7 @@ fn graph_marker_name(suffix: &str) -> Vec<u8> {
 /// inspecting the raw term sees which kind of thing it's looking at
 /// directly in the function symbol's own name rather than having to infer
 /// it from shape/position alone.
-fn graph_tag(tag: &str, args: Vec<LNTerm>) -> LNTerm {
+pub(crate) fn graph_tag(tag: &str, args: Vec<LNTerm>) -> LNTerm {
     let sym = NoEqSym::new(
         graph_marker_name(tag),
         args.len(),
@@ -241,15 +271,16 @@ fn graph_tag(tag: &str, args: Vec<LNTerm>) -> LNTerm {
 /// function symbol, so it is NEVER renamed by `CAN_alphaeqac`, and its
 /// NUL-prefixed name can never collide with a user's function symbol or
 /// name. A 0-ary special case of [`graph_tag`].
-fn graph_marker(suffix: &str) -> LNTerm {
+pub(crate) fn graph_marker(suffix: &str) -> LNTerm {
     graph_tag(suffix, Vec::new())
 }
 
 /// Lifts one graph vertex to a term: a `RuleInstance`/`Action`/`Dummy`
-/// vertex lifts as a type-tagged `RuleInstanceVertexTerm(node_id_term(nid), content)` /
+/// vertex lifts as a type-tagged `RuleInstanceVertexTerm(node_id_term(nid), rule, content)` /
 /// `ActionVertexTerm(node_id_term(nid), content)` / `DummyVertexTerm(node_id_term(nid))`
 /// -- ITS OWN NodeId FIRST, as a bare variable literal, directly before the
-/// vertex's own content ([`rule_to_term`]; [`fact_to_term`], `VertexKind::Action`'s
+/// vertex's own content (a rule instance's rule identity,
+/// [`rule_identity_marker`], then [`rule_to_term`]; [`fact_to_term`], `VertexKind::Action`'s
 /// payload already being a plain `LNFact`; or nothing at all for `Dummy`,
 /// whose tag alone already identifies it). A structural,
 /// NodeId-free vertex (`EdgeRelation`/`LessRelation`/`AtTimepointRelation`/
@@ -284,12 +315,18 @@ fn graph_marker(suffix: &str) -> LNTerm {
 /// over one formula at a time.
 fn vertex_to_term(v: &VertexKind) -> LNTerm {
     match v {
-        VertexKind::RuleInstance(nid, ru) => {
-            graph_tag("RuleInstanceVertexTerm", vec![node_id_term(*nid), rule_to_term(ru)])
-        }
-        VertexKind::Action(nid, fact) => {
-            graph_tag("ActionVertexTerm", vec![node_id_term(*nid), fact_to_term(fact)])
-        }
+        VertexKind::RuleInstance(nid, ru) => graph_tag(
+            "RuleInstanceVertexTerm",
+            vec![
+                node_id_term(*nid),
+                rule_identity_marker(ru),
+                rule_to_term(ru),
+            ],
+        ),
+        VertexKind::Action(nid, fact) => graph_tag(
+            "ActionVertexTerm",
+            vec![node_id_term(*nid), fact_to_term(fact)],
+        ),
         VertexKind::Dummy(nid) => graph_tag("DummyVertexTerm", vec![node_id_term(*nid)]),
         VertexKind::EdgeRelation(conc, prem) => {
             graph_marker(&format!("EdgeRelation:{}:{}", conc.0, prem.0))
@@ -313,7 +350,7 @@ fn node_id_term(nid: crate::constraint::constraints::NodeId) -> LNTerm {
 /// name/variable literal: a canonical POSITION is already a fixed,
 /// meaningful number, not something `CAN_alphaeqac` should be free to
 /// rename.
-fn index_marker(i: usize) -> LNTerm {
+pub(crate) fn index_marker(i: usize) -> LNTerm {
     graph_marker(&format!("idx:{i}"))
 }
 
@@ -534,7 +571,7 @@ fn lsort_to_sort_hint(s: LSort) -> p::SortHint {
 }
 
 /// A parser-AST variable spec as the `LVar` it denotes.
-fn varspec_to_lvar(v: &p::VarSpec) -> tamarin_term::lterm::LVar {
+pub(crate) fn varspec_to_lvar(v: &p::VarSpec) -> tamarin_term::lterm::LVar {
     tamarin_term::lterm::LVar::new(v.name.as_str(), sort_hint_to_lsort(v.sort), v.idx)
 }
 
@@ -568,13 +605,17 @@ pub fn subst_via_theta_guarded(g: &Guarded, theta: &Theta) -> Guarded {
 /// reordered smaller-first by [`cmp_term`]. Every other `GAtom` variant is
 /// directional (`Less`/`Subterm`, or simply not binary) and is returned
 /// unchanged.
+///
+/// A fact's annotations are dropped: they are hints to the solver's goal
+/// ranking with no meaning of their own, and [`fact_to_term`] leaves them out
+/// of rule and goal facts too.
 fn normalize_atom(a: &GAtom) -> GAtom {
     let t = ac_normalize_term;
     let f = |fact: &GFact| GFact {
         persistent: fact.persistent,
         name: fact.name.clone(),
         args: fact.args.iter().map(ac_normalize_term).collect(),
-        annotations: fact.annotations.clone(),
+        annotations: Vec::new(),
     };
     match a {
         GAtom::Eq(x, y) => {
@@ -799,7 +840,7 @@ fn hash_binding(h: &mut FingerprintHasher, b: &GBinding) {
     hash_sort_hint(h, b.sort);
 }
 
-fn fingerprint_atom(a: &GAtom) -> Fingerprint {
+pub(crate) fn fingerprint_atom(a: &GAtom) -> Fingerprint {
     let mut h = FingerprintHasher::new();
     match a {
         GAtom::Eq(x, y) => {
@@ -863,7 +904,7 @@ fn fact_annotation_byte(a: &p::FactAnnotation) -> u8 {
     }
 }
 
-fn fingerprint_gterm(t: &GTerm) -> Fingerprint {
+pub(crate) fn fingerprint_gterm(t: &GTerm) -> Fingerprint {
     let mut h = FingerprintHasher::new();
     match t {
         GTerm::Var(v) => {
@@ -1368,6 +1409,29 @@ pub fn canonicalize_constraint_system_with_labelling(
     sys: &System,
     colors: &crate::canon_color::ColorTable,
 ) -> Result<(CanonicalSystem, CanonLabelling), BlissError> {
+    canonicalize_constraint_system_with_stats(sys, colors)
+        .map(|(canon, labelling, _)| (canon, labelling))
+}
+
+/// Measurements of one graph-part canonicalization
+/// ([`canonicalize_constraint_system_with_stats`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GraphPartStats {
+    pub vertices: usize,
+    pub edges: usize,
+    /// `|Aut|` of the graph part: the labelings the minimization runs through.
+    pub group_size: usize,
+    /// Content passes: one per tied renaming of every labeling whose
+    /// graph-part term was not already larger than the best so far.
+    pub content_passes: usize,
+}
+
+/// [`canonicalize_constraint_system_with_labelling`], also returning how
+/// much the minimization over the automorphism group had to do.
+pub fn canonicalize_constraint_system_with_stats(
+    sys: &System,
+    colors: &crate::canon_color::ColorTable,
+) -> Result<(CanonicalSystem, CanonLabelling, GraphPartStats), BlissError> {
     // Stage A+B: vertex/edge structure plus the caller-supplied vertex
     // coloring, in one call -- see `canon_graph`'s own module docs for
     // why `GraphPart` owns its `ColorTable` rather than threading it
@@ -1388,9 +1452,16 @@ pub fn canonicalize_constraint_system_with_labelling(
     // skip Stage C/F entirely here rather than hard-failing a case that
     // has a perfectly well-defined canonical form and plenty of other
     // canonicalizable content (formulas, eq_store, ...) still to process.
+    let mut stats = GraphPartStats {
+        vertices: part.vertices.len(),
+        edges: part.edges.len(),
+        group_size: 1,
+        content_passes: 1,
+    };
     if part.vertices.is_empty() {
         let (graph_term, labelling) = canonicalize_graph_part_seeded(&[], &BTreeSet::new());
-        return Ok(canonicalize_system_content_seeded(sys, &labelling, graph_term));
+        let (canon, labelling) = canonicalize_system_content_seeded(sys, &labelling, graph_term);
+        return Ok((canon, labelling, stats));
     }
 
     // Stage C: bliss's own canonical labeling plus a GENERATING set for
@@ -1418,6 +1489,8 @@ pub fn canonicalize_constraint_system_with_labelling(
     // candidate replaces the incumbent, so on ties the first in group order,
     // then canonizer order, wins.
     let group = crate::bliss_proc::generate_group(&result.generators, part.vertices.len());
+    stats.group_size = group.len();
+    stats.content_passes = 0;
     let mut best: Option<(CanonicalSystem, CanonLabelling)> = None;
     for g in &group {
         let labeling = result.canonical_labeling.compose(g);
@@ -1431,6 +1504,7 @@ pub fn canonicalize_constraint_system_with_labelling(
             continue;
         }
         for labelling in &labellings {
+            stats.content_passes += 1;
             let candidate = canonicalize_system_content_seeded(sys, labelling, graph_term.clone());
             let better = best
                 .as_ref()
@@ -1440,7 +1514,73 @@ pub fn canonicalize_constraint_system_with_labelling(
             }
         }
     }
-    Ok(best.expect("the group contains at least the identity"))
+    let (canon, labelling) = best.expect("the group contains at least the identity");
+    Ok((canon, labelling, stats))
+}
+
+/// Which canonicalizer computes a system's canonical form. Both define the
+/// same equivalence; they differ in what bliss sees and so in how much has
+/// to be minimized afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonMode {
+    /// bliss on the graph part, then the minimum over its automorphism group
+    /// ([`canonicalize_constraint_system_with_labelling`]).
+    GraphPart,
+    /// bliss on the whole system as one term graph
+    /// ([`crate::canon_term_graph`]).
+    TermGraph,
+}
+
+impl CanonMode {
+    /// The environment variable [`CanonMode::from_env`] reads.
+    pub const ENV: &'static str = "TAM_RS_CANON";
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "graph-part" => Some(CanonMode::GraphPart),
+            "term-graph" => Some(CanonMode::TermGraph),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CanonMode::GraphPart => "graph-part",
+            CanonMode::TermGraph => "term-graph",
+        }
+    }
+
+    /// `TAM_RS_CANON` (`graph-part` or `term-graph`), read once per process;
+    /// unset means `graph-part`. Panics on any other value, so a typo cannot
+    /// silently select the default.
+    pub fn from_env() -> Self {
+        static MODE: std::sync::OnceLock<CanonMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var(Self::ENV) {
+            Err(_) => CanonMode::GraphPart,
+            Ok(s) => Self::parse(&s).unwrap_or_else(|| {
+                panic!("{}={s:?}: expected graph-part or term-graph", Self::ENV)
+            }),
+        })
+    }
+}
+
+/// [`canonicalize_constraint_system_with_labelling`] with the canonicalizer
+/// chosen by `mode`. `colors` is only used by [`CanonMode::GraphPart`].
+pub fn canonicalize_constraint_system_with_labelling_in(
+    mode: CanonMode,
+    sys: &System,
+    colors: &crate::canon_color::ColorTable,
+) -> Result<(CanonicalSystem, CanonLabelling), BlissError> {
+    match mode {
+        CanonMode::GraphPart => canonicalize_constraint_system_with_labelling(sys, colors),
+        CanonMode::TermGraph => {
+            crate::canon_term_graph::canonicalize_constraint_system_via_term_graph_with_labelling(
+                sys,
+                crate::canon_term_graph::TermGraphOptions::default(),
+            )
+            .map(|(canon, labelling, _)| (canon, labelling))
+        }
+    }
 }
 
 /// Extends `labelling` (already seeded from a graph-part canonization) through
@@ -3055,8 +3195,22 @@ mod tests {
         let expected_vertices = graph_tag(
             "VerticesTerm",
             vec![
-                graph_tag("RuleInstanceVertexTerm", vec![node_id_term(node(0)), rule_to_term(&r1)]),
-                graph_tag("RuleInstanceVertexTerm", vec![node_id_term(node(1)), rule_to_term(&r2)]),
+                graph_tag(
+                    "RuleInstanceVertexTerm",
+                    vec![
+                        node_id_term(node(0)),
+                        rule_identity_marker(&r1),
+                        rule_to_term(&r1),
+                    ],
+                ),
+                graph_tag(
+                    "RuleInstanceVertexTerm",
+                    vec![
+                        node_id_term(node(1)),
+                        rule_identity_marker(&r2),
+                        rule_to_term(&r2),
+                    ],
+                ),
             ],
         );
         let expected_edges = graph_tag(
@@ -4243,6 +4397,43 @@ mod tests {
             fingerprint_constraint_system(&two_x)
         );
         assert_eq!(one_x, one_y, "renaming the variable still merges");
+    }
+
+    /// Two rules with the same facts but different names (SAPIC generates
+    /// such pairs, e.g. `channels1`'s `incx_1_121`/`incx_3_121`): systems
+    /// differing only in which one a node instantiates are different
+    /// proof-search states. The rule colors already differ, but bliss's
+    /// colors are ranks, so without the rule's identity in the term both
+    /// systems got the same form. Renaming the variable still merges.
+    #[test]
+    fn systems_differing_only_in_a_rule_name_are_not_alpha_eq() {
+        if !bliss_available() {
+            return;
+        }
+        let thy = theory(
+            "theory T begin\n\
+             rule A1:\n  [ In(x) ] --> [ M(x) ]\n\
+             rule A2:\n  [ In(x) ] --> [ M(x) ]\n\
+             end",
+        );
+        let colors = color_table(&thy);
+        let with_rule = |name: &'static str, var: &str| {
+            let mut sys = System::empty();
+            let fact = |f: &str| proto_fact(Multiplicity::Linear, f, vec![v(var, LSort::Msg)]);
+            sys.add_node(
+                node(0),
+                rule_ac_inst(
+                    name,
+                    vec![in_fact(v(var, LSort::Msg))],
+                    vec![],
+                    vec![fact("M")],
+                ),
+            );
+            canonicalize_constraint_system(&sys, &colors)
+                .unwrap_or_else(|e| panic!("canonicalize ({name}, {var}): {e:?}"))
+        };
+        assert_ne!(with_rule("A1", "x"), with_rule("A2", "x"));
+        assert_eq!(with_rule("A1", "x"), with_rule("A1", "y"));
     }
 
     #[test]

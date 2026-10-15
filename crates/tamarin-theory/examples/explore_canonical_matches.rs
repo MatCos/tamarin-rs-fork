@@ -116,7 +116,7 @@
 //! `method_check` (`checked` merges, `mismatches`, `failures` to canonicalize
 //! a method, and up to 20 `examples`, each with the `representative`'s and
 //! the `duplicate`'s depth and path as `[{method, case}, …]` steps plus the
-//! methods only on either side), `methods` (interned method text, including
+//! methods only on either side), `canon` (see `--canon`), `methods` (interned method text, including
 //! candidate methods that were never applied) and `nodes`: per OR node its `depth`
 //! (min depth), `status` (`expanded`, `finished` + `result`, `depth_limit`,
 //! `unexpanded`, `asleep`, `canon_panic`, `exec_panic`), `canon_err` (canonicalization returned an
@@ -131,7 +131,7 @@
 //! `and` (`method` index, `kind`, `cases` as
 //! `[name, child_id]` pairs).
 //!
-//! Usage: `cargo run --example explore_canonical_matches -- <theory.spthy> <lemma> [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--no-canon] [--sleep-sets] [--top-methods N] [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] [--heartbeat SECS] [--trace] [-D=FLAG ...] [--auto-sources]`
+//! Usage: `cargo run --example explore_canonical_matches -- <theory.spthy> <lemma> [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--no-canon] [--sleep-sets] [--top-methods N] [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] [--heartbeat SECS] [--trace] [--canon graph-part|term-graph|both] [-D=FLAG ...] [--auto-sources]`
 //! or `... -- --list-lemmas <theory.spthy> [-D=FLAG ...] [--auto-sources]`.
 //!
 //! The theory is loaded as `tamarin-rs --prove` loads it
@@ -191,6 +191,25 @@
 //!   `exec_proof_method` can take minutes) is visible as such.
 //! - `--trace`: log every expansion and every applied method, so a run
 //!   killed from outside still shows where it was.
+//! - `--canon MODE` (default `TAM_RS_CANON`, else `graph-part`): which
+//!   canonicalizer merges. `graph-part` is bliss on the graph part plus the
+//!   minimum over its automorphism group (`canon`); `term-graph` is bliss on
+//!   the whole system as one term graph (`canon_term_graph`). `both` merges
+//!   with `graph-part`, so the explored graph is that of a plain run, and also
+//!   canonicalizes every occurrence with `term-graph` and compares the two
+//!   partitions. The JSON's `canon` object has `mode`, `primary` (the merging
+//!   canonicalizer: per-canonicalization `secs` -- the term graph's without
+//!   its diagnostic generator check --, `wall_secs`, graph `vertices` and
+//!   `edges`, `aut` (`|Aut|` of the graph bliss saw), `content_passes`, and
+//!   for the term graph its generator counts, `generator_moves`, up to 20
+//!   `non_genuine_examples` and `phase_secs`), and with
+//!   `both` also `term_graph` (the same for the term graph) and `compare`:
+//!   `old_classes`/`new_classes`/`pairs` (the partitions agree iff all three
+//!   are equal), `split_by_term_graph` (occurrences the graph part merges
+//!   with an earlier one and the term graph doesn't), `joined_by_term_graph`
+//!   (the reverse), up to 20 examples of each as `processed` numbers and
+//!   paths, and `cert_equal_forms_differ` / `forms_equal_certs_differ` (the
+//!   term graph's canonical-graph certificate against its canonical form).
 //! - `--list-lemmas`: print one JSON object describing the theory instead
 //!   of exploring: `lines`, `diff` (only parses with the `diff` flag, or has
 //!   diff/equivalence lemmas; the port has no diff-mode prover),
@@ -229,8 +248,8 @@
 //!   the merge check (candidate methods of merged occurrences, method
 //!   signatures). The first two are what merging costs, the next two
 //!   Tamarin's own search, the last this tool's verification.
-//! - `PROFILE_CANON=1` -- breaks the canonicalization bucket down into its
-//!   internal stages: Stage A graph extraction, Stage C's external `bliss`
+//! - `PROFILE_CANON=1` -- breaks the graph-part canonicalizer down into its
+//!   internal stages (whatever `--canon` says): Stage A graph extraction, Stage C's external `bliss`
 //!   subprocess (dimacs, spawn and parse), Stage F's automorphism GROUP
 //!   CLOSURE and group MINIMIZATION, Stage D's per-survivor re-seeding, and
 //!   Stage G (formulas/solved_formulas/lemmas/eq_store.subst/eq_store.conj/
@@ -265,6 +284,12 @@
 //!   plus its vertex kinds to `<--out>.occ<N>.vertices`, before
 //!   canonicalizing it -- for a canonicalization that takes very long
 //!   (`bliss -directed <file>` reports `|Aut|`).
+//! - `DUMP_TERM_GRAPH_AT=N` -- writes the N-th canonicalized occurrence as
+//!   a term (`<--out>.occ<N>.term.txt`), its term graph as bliss input
+//!   (`.tg.dimacs`) and every vertex's color and key (`.tg.keys`).
+//! - `TERM_GRAPH_CHECK=0` -- skip the term graph's check that every
+//!   automorphism generator is a symmetry of the system (on by default; its
+//!   time is reported apart, as `phase_secs.check`).
 //! - `DUMP_CANON_PANIC=1` -- for the first occurrence whose canonicalization
 //!   panics, prints its rule instances and non-graph part (formulas,
 //!   equation store, goals, ...) to stderr, to find which content the
@@ -296,7 +321,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tamarin_theory::bliss_proc::{
     bliss_available, canonical_edges, canonical_vertex_order, generate_group, graph_part_to_dimacs,
-    run_bliss, Permutation,
+    run_bliss, to_dimacs, BlissError, Permutation,
 };
 use tamarin_term::alpha_eq_ac::{canonicalize_alpha_eq_ac, CanonLabelling};
 use tamarin_term::fingerprint::{fingerprint_term, Fingerprint};
@@ -304,10 +329,11 @@ use tamarin_term::lterm::{HasFrees, LNTerm, LSort, LVar};
 use tamarin_term::term::Term;
 use tamarin_term::vterm::Lit;
 use tamarin_theory::canon::{
-    canonicalize_constraint_system_with_labelling, canonicalize_graph_part_seeded,
+    canonicalize_constraint_system_with_stats, canonicalize_graph_part_seeded,
     canonicalize_graph_part, canonicalize_proof_method, canonicalize_system_content_seeded_profiled,
     fact_to_term,
-    minimal_graph_part_labelings, rule_to_term, CanonicalSystem, ContentStageTimes,
+    minimal_graph_part_labelings, rule_to_term, CanonMode, CanonicalSystem, ContentStageTimes,
+    GraphPartStats,
 };
 use tamarin_theory::canon_color::{Color, ColorTable};
 use tamarin_theory::pretty_system::pretty_fact;
@@ -316,6 +342,10 @@ use tamarin_theory::canon_fingerprint::{
     fingerprint_constraint_system, fingerprint_proof_method, CanonicalSystemFingerprint,
 };
 use tamarin_theory::canon_graph::{extract_graph_part, GraphPart, VertexKind};
+use tamarin_theory::canon_term_graph::{
+    canonicalize_constraint_system_via_term_graph_with_labelling, system_to_term, term_to_graph,
+    TermGraphOptions, TermGraphStats,
+};
 use tamarin_theory::constraint::solver::context::{CutStrategy, ProofContext};
 use tamarin_theory::constraint::solver::proof_method::{
     exec_proof_method, ProofMethod, Result as FinishedResult,
@@ -1815,6 +1845,402 @@ struct StageTimers {
 }
 
 // =============================================================================
+// Canonicalization modes (`--canon`) and their comparison
+// =============================================================================
+
+/// `--canon`: which canonicalizer merges, and whether the term-graph one also
+/// runs on every occurrence for comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonArg {
+    Only(CanonMode),
+    /// Merge with the graph-part canonicalizer; also run the term-graph one.
+    Both,
+}
+
+impl CanonArg {
+    fn parse(s: &str) -> Option<Self> {
+        if s == "both" {
+            return Some(CanonArg::Both);
+        }
+        CanonMode::parse(s).map(CanonArg::Only)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            CanonArg::Only(mode) => mode.name(),
+            CanonArg::Both => "both",
+        }
+    }
+
+    /// The canonicalizer whose form decides merges.
+    fn primary(self) -> CanonMode {
+        match self {
+            CanonArg::Only(mode) => mode,
+            CanonArg::Both => CanonMode::GraphPart,
+        }
+    }
+}
+
+/// The measurements one canonicalization returns.
+enum OccStats {
+    GraphPart(GraphPartStats),
+    TermGraph(TermGraphStats),
+}
+
+/// Canonicalizes `sys` with `mode`. The term-graph canonicalizer runs with
+/// `options`; the graph-part one ignores them.
+fn canonicalize_with(
+    mode: CanonMode,
+    sys: &System,
+    colors: &ColorTable,
+    options: TermGraphOptions,
+) -> Result<(CanonicalSystem, CanonLabelling, OccStats), BlissError> {
+    match mode {
+        CanonMode::GraphPart => canonicalize_constraint_system_with_stats(sys, colors)
+            .map(|(canon, labelling, stats)| (canon, labelling, OccStats::GraphPart(stats))),
+        CanonMode::TermGraph => {
+            canonicalize_constraint_system_via_term_graph_with_labelling(sys, options)
+                .map(|(canon, labelling, stats)| (canon, labelling, OccStats::TermGraph(stats)))
+        }
+    }
+}
+
+/// Count, sum, mean, median, 95th percentile and maximum of `values`.
+fn distribution(values: &[f64]) -> Value {
+    if values.is_empty() {
+        return json!({"n": 0});
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let sum: f64 = sorted.iter().sum();
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    json!({
+        "n": sorted.len(),
+        "sum": sum,
+        "mean": sum / sorted.len() as f64,
+        "p50": at(0.5),
+        "p95": at(0.95),
+        "max": sorted[sorted.len() - 1],
+    })
+}
+
+/// What one canonicalizer did over a run.
+#[derive(Default)]
+struct ModeSummary {
+    /// Wall time per canonicalization, the term graph's generator check
+    /// included.
+    wall_secs: Vec<f64>,
+    /// The time a search would pay: the wall time, minus the term graph's
+    /// generator check and certificate (diagnostics only).
+    secs: Vec<f64>,
+    vertices: Vec<f64>,
+    edges: Vec<f64>,
+    /// `|Aut|` of the graph bliss saw (1 where bliss did not run).
+    aut: Vec<f64>,
+    /// Content passes: the graph part's minimization runs one per labeling
+    /// and tied renaming; the term graph one.
+    content_passes: Vec<f64>,
+    generators: u64,
+    /// Term graph only, see `TermGraphStats`.
+    generators_moving_free_vars: u64,
+    non_genuine_generators: u64,
+    /// Term graph only: what its generators permute (`TermGraphStats::generator_moves`).
+    generator_moves: BTreeMap<String, u64>,
+    /// Term graph only: occurrences with a non-genuine generator, with what it
+    /// moves and which fields of the form it changes.
+    non_genuine_examples: Vec<Value>,
+    bliss_skipped: u64,
+    term_secs: f64,
+    graph_secs: f64,
+    bliss_secs: f64,
+    content_secs: f64,
+    check_secs: f64,
+    failures: u64,
+    failure_examples: Vec<Value>,
+}
+
+impl ModeSummary {
+    fn record(&mut self, wall: Duration, stats: &OccStats) {
+        self.wall_secs.push(wall.as_secs_f64());
+        match stats {
+            OccStats::GraphPart(s) => {
+                self.secs.push(wall.as_secs_f64());
+                self.vertices.push(s.vertices as f64);
+                self.edges.push(s.edges as f64);
+                self.aut.push(s.group_size as f64);
+                self.content_passes.push(s.content_passes as f64);
+            }
+            OccStats::TermGraph(s) => {
+                let production = s.time_term + s.time_graph + s.time_bliss + s.time_content;
+                self.secs.push(production.as_secs_f64());
+                self.vertices.push(s.vertices as f64);
+                self.edges.push(s.edges as f64);
+                self.aut.push(
+                    s.aut_size
+                        .as_deref()
+                        .map_or(1.0, |a| a.parse().unwrap_or(f64::NAN)),
+                );
+                self.content_passes.push(1.0);
+                self.generators += s.generators as u64;
+                self.generators_moving_free_vars += s.generators_moving_free_vars as u64;
+                self.non_genuine_generators += s.non_genuine_generators as u64;
+                for (moved, n) in &s.generator_moves {
+                    *self.generator_moves.entry(moved.clone()).or_insert(0) += *n as u64;
+                }
+                self.bliss_skipped += u64::from(!s.bliss_ran);
+                self.term_secs += s.time_term.as_secs_f64();
+                self.graph_secs += s.time_graph.as_secs_f64();
+                self.bliss_secs += s.time_bliss.as_secs_f64();
+                self.content_secs += s.time_content.as_secs_f64();
+                self.check_secs += s.time_check.as_secs_f64();
+            }
+        }
+    }
+
+    /// Logs and keeps (up to [`FAILURE_EXAMPLES_LIMIT`]) an occurrence whose
+    /// term graph has a generator that is not a symmetry of the system.
+    fn record_non_genuine(&mut self, stats: &TermGraphStats, processed: u64, path: String) {
+        if stats.non_genuine_generators == 0 {
+            return;
+        }
+        log!(
+            "term graph: {} non-genuine generator(s) at processed={processed} {path}: moves {:?}, \
+             fields {:?}",
+            stats.non_genuine_generators,
+            stats.non_genuine_moves,
+            stats.non_genuine_fields
+        );
+        if self.non_genuine_examples.len() < FAILURE_EXAMPLES_LIMIT {
+            self.non_genuine_examples.push(json!({
+                "processed": processed,
+                "path": path,
+                "moves": stats.non_genuine_moves,
+                "fields": stats.non_genuine_fields,
+            }));
+        }
+    }
+
+    fn record_failure(&mut self, kind: &str, path: String, message: String) {
+        self.failures += 1;
+        if self.failure_examples.len() < FAILURE_EXAMPLES_LIMIT {
+            self.failure_examples
+                .push(json!({"kind": kind, "path": path, "message": message}));
+        }
+    }
+
+    fn json(&self, mode: CanonMode) -> Value {
+        let nontrivial = self.aut.iter().filter(|&&a| a > 1.0).count();
+        let mut doc = json!({
+            "mode": mode.name(),
+            "canonicalizations": self.secs.len(),
+            "secs": distribution(&self.secs),
+            "wall_secs": distribution(&self.wall_secs),
+            "vertices": distribution(&self.vertices),
+            "edges": distribution(&self.edges),
+            "aut": distribution(&self.aut),
+            "nontrivial_aut": nontrivial,
+            "content_passes": distribution(&self.content_passes),
+            "failures": self.failures,
+            "failure_examples": self.failure_examples,
+        });
+        if mode == CanonMode::TermGraph {
+            doc["generators"] = json!(self.generators);
+            doc["generators_moving_free_vars"] = json!(self.generators_moving_free_vars);
+            doc["non_genuine_generators"] = json!(self.non_genuine_generators);
+            doc["generator_moves"] = json!(self.generator_moves);
+            doc["non_genuine_examples"] = json!(self.non_genuine_examples);
+            doc["bliss_skipped"] = json!(self.bliss_skipped);
+            doc["phase_secs"] = json!({
+                "term": self.term_secs,
+                "graph": self.graph_secs,
+                "bliss": self.bliss_secs,
+                "content": self.content_secs,
+                "check": self.check_secs,
+            });
+        }
+        doc
+    }
+
+    /// One line for the terminal.
+    fn line(&self, mode: CanonMode) -> String {
+        let total: f64 = self.secs.iter().sum();
+        let max_aut = self.aut.iter().copied().fold(1.0, f64::max);
+        let passes: f64 = self.content_passes.iter().sum();
+        let mut line = format!(
+            "{}: {} canonicalizations in {total:.2}s (mean {:.2}ms), vertices mean {:.0}, \
+             |Aut| > 1 in {}, max |Aut| {max_aut:.3e}, content passes {passes:.0}",
+            mode.name(),
+            self.secs.len(),
+            1000.0 * total / self.secs.len().max(1) as f64,
+            self.vertices.iter().sum::<f64>() / self.vertices.len().max(1) as f64,
+            self.aut.iter().filter(|&&a| a > 1.0).count(),
+        );
+        if mode == CanonMode::TermGraph {
+            line += &format!(
+                ", generators {} (moving free variables {}, not genuine {}), bliss skipped {}",
+                self.generators,
+                self.generators_moving_free_vars,
+                self.non_genuine_generators,
+                self.bliss_skipped
+            );
+            let mut moves: Vec<(&String, &u64)> = self.generator_moves.iter().collect();
+            moves.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            if !moves.is_empty() {
+                let top: Vec<String> = moves
+                    .iter()
+                    .take(3)
+                    .map(|(m, n)| format!("{m} ×{n}"))
+                    .collect();
+                line += &format!("; generators move {}", top.join(", "));
+            }
+        }
+        if self.failures > 0 {
+            line += &format!(", FAILURES {}", self.failures);
+        }
+        line
+    }
+}
+
+/// `--canon both`: whether the two canonicalizers merge the same
+/// occurrences. Each occurrence has an old (graph-part) and a new
+/// (term-graph) fingerprint; the partitions agree iff the pairs are a
+/// bijection between old and new classes.
+#[derive(Default)]
+struct CanonCompare {
+    /// Old fingerprint -> the new one, `processed` number and path of its
+    /// first occurrence; and the reverse.
+    old_first: FastMap<CanonicalSystemFingerprint, (CanonicalSystemFingerprint, u64, String)>,
+    new_first: FastMap<CanonicalSystemFingerprint, (CanonicalSystemFingerprint, u64, String)>,
+    pairs: FastMap<(CanonicalSystemFingerprint, CanonicalSystemFingerprint), ()>,
+    /// Occurrences that the old form merges with an earlier one and the new
+    /// form does not (a merge the term graph misses).
+    split: u64,
+    /// Occurrences that the new form merges with an earlier one and the old
+    /// form does not (the old form was incomplete, or a false merge).
+    joined: u64,
+    split_examples: Vec<Value>,
+    joined_examples: Vec<Value>,
+    /// Certificate -> new fingerprint, and the reverse.
+    cert_form: FastMap<Fingerprint, CanonicalSystemFingerprint>,
+    form_cert: FastMap<CanonicalSystemFingerprint, Fingerprint>,
+    /// Equal certificates with different forms: a certificate-only key
+    /// would have merged them.
+    cert_equal_forms_differ: u64,
+    /// Equal forms with different certificates: impossible if bliss's
+    /// labeling is canonical and the encoding is faithful.
+    forms_equal_certs_differ: u64,
+}
+
+const COMPARE_EXAMPLES_LIMIT: usize = 20;
+
+impl CanonCompare {
+    fn record(
+        &mut self,
+        old: CanonicalSystemFingerprint,
+        new: CanonicalSystemFingerprint,
+        certificate: Option<Fingerprint>,
+        processed: u64,
+        path: String,
+    ) {
+        let first_pair = self.pairs.insert((old, new), ()).is_none();
+        let example = |first: &(CanonicalSystemFingerprint, u64, String)| {
+            json!({
+                "first": {"processed": first.1, "path": first.2},
+                "this": {"processed": processed, "path": path.clone()},
+            })
+        };
+        match self.old_first.get(&old) {
+            None => {
+                self.old_first.insert(old, (new, processed, path.clone()));
+            }
+            Some(first) if first.0 != new => {
+                self.split += 1;
+                if first_pair && self.split_examples.len() < COMPARE_EXAMPLES_LIMIT {
+                    self.split_examples.push(example(first));
+                }
+            }
+            Some(_) => {}
+        }
+        match self.new_first.get(&new) {
+            None => {
+                self.new_first.insert(new, (old, processed, path.clone()));
+            }
+            Some(first) if first.0 != old => {
+                self.joined += 1;
+                if first_pair && self.joined_examples.len() < COMPARE_EXAMPLES_LIMIT {
+                    self.joined_examples.push(example(first));
+                }
+            }
+            Some(_) => {}
+        }
+        if let Some(cert) = certificate {
+            if *self.cert_form.entry(cert).or_insert(new) != new {
+                self.cert_equal_forms_differ += 1;
+            }
+            if *self.form_cert.entry(new).or_insert(cert) != cert {
+                self.forms_equal_certs_differ += 1;
+            }
+        }
+    }
+
+    fn partitions_agree(&self) -> bool {
+        self.pairs.len() == self.old_first.len() && self.pairs.len() == self.new_first.len()
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "old_classes": self.old_first.len(),
+            "new_classes": self.new_first.len(),
+            "pairs": self.pairs.len(),
+            "partitions_agree": self.partitions_agree(),
+            "split_by_term_graph": self.split,
+            "joined_by_term_graph": self.joined,
+            "split_examples": self.split_examples,
+            "joined_examples": self.joined_examples,
+            "certificates": self.cert_form.len(),
+            "cert_equal_forms_differ": self.cert_equal_forms_differ,
+            "forms_equal_certs_differ": self.forms_equal_certs_differ,
+        })
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "compare: classes graph-part {} term-graph {} pairs {} agree={} \
+             split_by_term_graph={} joined_by_term_graph={} \
+             cert_equal_forms_differ={} forms_equal_certs_differ={}",
+            self.old_first.len(),
+            self.new_first.len(),
+            self.pairs.len(),
+            self.partitions_agree(),
+            self.split,
+            self.joined,
+            self.cert_equal_forms_differ,
+            self.forms_equal_certs_differ
+        )
+    }
+}
+
+/// `DUMP_TERM_GRAPH_AT`: `sys` as a term, its graph as bliss input, and the
+/// key of every vertex.
+fn dump_term_graph(sys: &System, stem: &str) {
+    let term = system_to_term(sys);
+    let graph = term_to_graph(&term);
+    let keys: String = graph
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("{} {} {:?}\n", i + 1, graph.colors[i], k))
+        .collect();
+    let written = std::fs::write(format!("{stem}.term.txt"), format!("{term}\n"))
+        .and_then(|()| match to_dimacs(&graph.colors, &graph.edges) {
+            Ok(dimacs) => std::fs::write(format!("{stem}.tg.dimacs"), dimacs),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        })
+        .and_then(|()| std::fs::write(format!("{stem}.tg.keys"), keys));
+    log!("DUMP_TERM_GRAPH_AT: wrote {stem}.term.txt/.tg.dimacs/.tg.keys: {written:?}");
+}
+
+// =============================================================================
 // Exploration
 // =============================================================================
 
@@ -1836,6 +2262,11 @@ struct Flags {
     /// `DUMP_MERGES_INTO=ID[,ID...]`, with the `--out` path the dumps are
     /// named after.
     dump_merges_into: Option<(BTreeSet<OrId>, String)>,
+    /// `DUMP_TERM_GRAPH_AT=N`, with the `--out` path the dump is named after.
+    dump_term_graph_at: Option<(u64, String)>,
+    /// The term-graph canonicalizer checks its generators (`TERM_GRAPH_CHECK`,
+    /// on unless `0`).
+    term_graph_check: bool,
 }
 
 /// The goals asleep at a node, by `GoalStatus::nr` (see `--sleep-sets`).
@@ -1854,6 +2285,14 @@ struct Queued {
 struct Explorer<'a> {
     ctx: &'a ProofContext,
     flags: Flags,
+    /// `--canon`.
+    canon: CanonArg,
+    /// What the merging canonicalizer did.
+    primary_summary: ModeSummary,
+    /// `--canon both`: what the term-graph canonicalizer did, and how its
+    /// merges compare.
+    secondary_summary: ModeSummary,
+    compare: CanonCompare,
     max_depth: usize,
     no_merge: bool,
     /// `--no-canon`: never canonicalize (implies `no_merge`).
@@ -1987,6 +2426,11 @@ impl Explorer<'_> {
                 dump_dimacs(&sys, &ctx.color_table, &format!("{out}.occ{n}"));
             }
         }
+        if let Some((n, out)) = &self.flags.dump_term_graph_at {
+            if self.processed == *n {
+                dump_term_graph(&sys, &format!("{out}.occ{n}"));
+            }
+        }
         if self.no_canon {
             // `expand` ranks the methods, so a node at the depth limit never
             // pays for it.
@@ -1995,9 +2439,14 @@ impl Explorer<'_> {
             return id;
         }
         set_activity_step("canonicalize");
+        let primary = self.canon.primary();
+        let options = TermGraphOptions {
+            check_generators: self.flags.term_graph_check,
+            certificate: false,
+        };
         let (canon, canon_took) = timed(&mut self.timers.canonicalize, || {
             catch_unwind(AssertUnwindSafe(|| {
-                canonicalize_constraint_system_with_labelling(&sys, &ctx.color_table)
+                canonicalize_with(primary, &sys, &ctx.color_table, options)
             }))
         });
         let mut fingerprint_took = Duration::ZERO;
@@ -2032,11 +2481,20 @@ impl Explorer<'_> {
                 self.record_canon_failure("error", None, depth, edge, format!("{e:?}"));
                 (None, None, None)
             }
-            Ok(Ok((canon, labelling))) => {
+            Ok(Ok((canon, labelling, stats))) => {
+                self.primary_summary.record(canon_took, &stats);
+                if let OccStats::TermGraph(s) = &stats {
+                    let path = self.graph.path(edge);
+                    self.primary_summary
+                        .record_non_genuine(s, self.processed, path);
+                }
                 let (fp, took) = timed(&mut self.timers.fingerprint, || {
                     fingerprint_constraint_system(&canon)
                 });
                 fingerprint_took = took;
+                if self.canon == CanonArg::Both {
+                    self.compare_with_term_graph(&sys, fp, edge);
+                }
                 if self.flags.dump_merges_into.is_some() {
                     self.dump_merge_occurrence(&sys, &canon, &labelling, &fp, depth, edge);
                 }
@@ -2078,6 +2536,55 @@ impl Explorer<'_> {
         }
         self.queue.push_back(Queued { id, sys, methods, sleep });
         id
+    }
+
+    /// `--canon both`: canonicalizes this occurrence with the term graph too
+    /// (generator check and certificate included) and records whether it
+    /// merges like `old`, the graph-part fingerprint.
+    fn compare_with_term_graph(
+        &mut self,
+        sys: &System,
+        old: CanonicalSystemFingerprint,
+        edge: Option<(OrId, u32, u32)>,
+    ) {
+        set_activity_step("canonicalize (term graph)");
+        let options = TermGraphOptions {
+            check_generators: self.flags.term_graph_check,
+            certificate: true,
+        };
+        let start = Instant::now();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            canonicalize_constraint_system_via_term_graph_with_labelling(sys, options)
+        }));
+        let took = start.elapsed();
+        match result {
+            Ok(Ok((canon, _, stats))) => {
+                let certificate = stats.certificate;
+                self.secondary_summary.record_non_genuine(
+                    &stats,
+                    self.processed,
+                    self.graph.path(edge),
+                );
+                self.secondary_summary
+                    .record(took, &OccStats::TermGraph(stats));
+                let new = fingerprint_constraint_system(&canon);
+                self.compare
+                    .record(old, new, certificate, self.processed, self.graph.path(edge));
+            }
+            Ok(Err(e)) => {
+                let path = self.graph.path(edge);
+                log!("term-graph canonicalization failed at {path}: {e:?}");
+                self.secondary_summary
+                    .record_failure("error", path, format!("{e:?}"));
+            }
+            Err(payload) => {
+                let path = self.graph.path(edge);
+                let message = panic_message(&*payload).to_string();
+                log!("term-graph canonicalization PANICKED at {path}: {message}");
+                self.secondary_summary
+                    .record_failure("panic", path, message);
+            }
+        }
     }
 
     /// `DUMP_MERGES_INTO`: if this occurrence creates, or merges into, one
@@ -2746,6 +3253,9 @@ struct Args {
     heartbeat: Option<f64>,
     /// `--trace`: log every expansion and every applied method.
     trace: bool,
+    /// `--canon graph-part|term-graph|both` (default: `TAM_RS_CANON`, else
+    /// `graph-part`).
+    canon: CanonArg,
     /// `-D=<flag>` / `--auto-sources`: how the theory is loaded.
     load: common::LoadOpts,
 }
@@ -2759,7 +3269,8 @@ enum Mode {
 const USAGE: &str = "usage: explore_canonical_matches <theory.spthy> <lemma> \
      [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--no-canon] [--sleep-sets] \
      [--top-methods N] [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] \
-     [--heartbeat SECS] [--trace] [-D=FLAG ...] [--auto-sources]\n       \
+     [--heartbeat SECS] [--trace] [--canon graph-part|term-graph|both] [-D=FLAG ...] \
+     [--auto-sources]\n       \
      explore_canonical_matches --list-lemmas <theory.spthy> [-D=FLAG ...] [--auto-sources]";
 
 fn usage_error(message: &str) -> ! {
@@ -2814,6 +3325,7 @@ fn parse_args(raw: &[String]) -> Mode {
         setup_timeout: None,
         heartbeat: None,
         trace: false,
+        canon: CanonArg::Only(CanonMode::from_env()),
         load,
     };
     let mut i = 3;
@@ -2849,6 +3361,10 @@ fn parse_args(raw: &[String]) -> Mode {
                 args.top_methods = Some(n as usize);
             }
             "--trace" => args.trace = true,
+            "--canon" => {
+                args.canon = CanonArg::parse(value())
+                    .unwrap_or_else(|| usage_error("--canon wants graph-part, term-graph or both"))
+            }
             other => usage_error(&format!("unrecognized argument: {other}")),
         }
         i += if matches!(flag, "--no-merge" | "--no-canon" | "--sleep-sets" | "--trace") {
@@ -3028,6 +3544,20 @@ fn write_json_atomically(out: &str, doc: &Value) -> std::io::Result<()> {
     std::fs::rename(&tmp, out)
 }
 
+/// The JSON's `canon` object: the merging canonicalizer's summary, and with
+/// `--canon both` the term graph's and the comparison.
+fn canon_json(explorer: &Explorer) -> Value {
+    let mut doc = json!({
+        "mode": explorer.canon.name(),
+        "primary": explorer.primary_summary.json(explorer.canon.primary()),
+    });
+    if explorer.canon == CanonArg::Both {
+        doc["term_graph"] = explorer.secondary_summary.json(CanonMode::TermGraph);
+        doc["compare"] = explorer.compare.json();
+    }
+    doc
+}
+
 fn main() {
     PROCESS_START.get_or_init(Instant::now);
     install_panic_hook();
@@ -3112,7 +3642,22 @@ fn main() {
                     .unwrap_or_else(|| default_out_path(&args.theory_path, &args.lemma));
                 (ids, out)
             }),
+            dump_term_graph_at: std::env::var("DUMP_TERM_GRAPH_AT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|n| {
+                    let out = args
+                        .out
+                        .clone()
+                        .unwrap_or_else(|| default_out_path(&args.theory_path, &args.lemma));
+                    (n, out)
+                }),
+            term_graph_check: std::env::var("TERM_GRAPH_CHECK").as_deref() != Ok("0"),
         },
+        canon: args.canon,
+        primary_summary: ModeSummary::default(),
+        secondary_summary: ModeSummary::default(),
+        compare: CanonCompare::default(),
         max_depth: args.max_depth,
         no_merge: args.no_merge,
         no_canon: args.no_canon,
@@ -3178,6 +3723,7 @@ fn main() {
             "no_canon": args.no_canon,
             "sleep_sets": args.sleep_sets,
             "top_methods": args.top_methods,
+            "canon": args.canon.name(),
             "time_budget": args.time_budget,
             "max_rss_gb": args.max_rss_gb,
             "setup_timeout": args.setup_timeout,
@@ -3209,6 +3755,7 @@ fn main() {
             "failures": check.failures,
             "examples": check.examples,
         },
+        "canon": canon_json(&explorer),
         "panic": explorer.panic,
         "sleep": args.sleep_sets.then(|| json!({
             "skipped_methods": explorer.sleep_skipped,
@@ -3258,6 +3805,19 @@ fn main() {
             "sleep sets: {} candidate method(s) skipped, {} node(s) asleep",
             explorer.sleep_skipped, summary.status_counts["asleep"]
         );
+    }
+    if !args.no_canon {
+        println!(
+            "  canon {}",
+            explorer.primary_summary.line(args.canon.primary())
+        );
+    }
+    if args.canon == CanonArg::Both {
+        println!(
+            "  canon {}",
+            explorer.secondary_summary.line(CanonMode::TermGraph)
+        );
+        println!("  canon {}", explorer.compare.line());
     }
 
     if explorer.flags.profile {

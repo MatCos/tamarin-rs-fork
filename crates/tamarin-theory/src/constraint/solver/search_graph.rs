@@ -27,7 +27,9 @@ use tamarin_term::alpha_eq_ac::CanonLabelling;
 use tamarin_term::fingerprint::Fingerprint;
 use tamarin_utils::FastMap;
 
-use crate::canon::{canonicalize_constraint_system_with_labelling, canonicalize_proof_method};
+use crate::canon::{
+    canonicalize_constraint_system_with_labelling_in, canonicalize_proof_method, CanonMode,
+};
 use crate::canon_fingerprint::{
     fingerprint_constraint_system, fingerprint_proof_method, CanonicalSystemFingerprint,
 };
@@ -631,7 +633,7 @@ impl StatsReporter {
         eprintln!(
             "[search-stats] search={} lemma={} final={} end={} root={} classes={} leaves={} \
              merges={} shared={} asleep={} skipped_asleep={} applied={} execs={} canons={} \
-             canon_s={:.3} busy_s={:.3} elapsed_s={:.3}",
+             canon_s={:.3} busy_s={:.3} elapsed_s={:.3} canon={}",
             self.search,
             lemma,
             u8::from(end.is_some()),
@@ -649,6 +651,7 @@ impl StatsReporter {
             work.canon_time.as_secs_f64(),
             work.busy.as_secs_f64(),
             self.started.elapsed().as_secs_f64(),
+            CanonMode::from_env().name(),
         );
     }
 }
@@ -706,8 +709,12 @@ pub(crate) fn canonical_key(
     work: &mut WorkStats,
 ) -> (CanonicalSystemFingerprint, CanonLabelling) {
     let start = Instant::now();
-    let (canon, labelling) = canonicalize_constraint_system_with_labelling(sys, &ctx.color_table)
-        .unwrap_or_else(|e| panic!("TAM_RS_MERGE: canonicalizing a constraint system failed: {e}"));
+    let (canon, labelling) = canonicalize_constraint_system_with_labelling_in(
+        CanonMode::from_env(),
+        sys,
+        &ctx.color_table,
+    )
+    .unwrap_or_else(|e| panic!("TAM_RS_MERGE: canonicalizing a constraint system failed: {e}"));
     let key = fingerprint_constraint_system(&canon);
     work.canons += 1;
     work.canon_time += start.elapsed();
