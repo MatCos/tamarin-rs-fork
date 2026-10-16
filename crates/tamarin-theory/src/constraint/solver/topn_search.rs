@@ -573,8 +573,7 @@ impl<'a> Engine<'a> {
         } else {
             classify(self.ctx, sys, self.config.merge, &mut work)
         };
-        self.stats.work.canons += work.canons;
-        self.stats.work.canon_time += work.canon_time;
+        self.stats.work.add(&work);
         let root = self.intern(child, 0, 0);
         assert_eq!(root, ROOT, "the root is the first class");
     }

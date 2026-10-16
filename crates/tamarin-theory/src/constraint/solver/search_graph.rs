@@ -511,15 +511,34 @@ pub(crate) struct WorkStats {
     pub(crate) execs: u64,
     pub(crate) canons: u64,
     pub(crate) canon_time: Duration,
+    /// The fastest and the slowest single canonicalization; meaningful only
+    /// when `canons > 0`.
+    pub(crate) canon_min: Duration,
+    pub(crate) canon_max: Duration,
     pub(crate) busy: Duration,
 }
 
 impl WorkStats {
     pub(crate) fn add(&mut self, other: &WorkStats) {
+        if other.canons > 0 {
+            self.canon_min = if self.canons == 0 {
+                other.canon_min
+            } else {
+                self.canon_min.min(other.canon_min)
+            };
+            self.canon_max = self.canon_max.max(other.canon_max);
+        }
         self.execs += other.execs;
         self.canons += other.canons;
         self.canon_time += other.canon_time;
         self.busy += other.busy;
+    }
+
+    fn record_canon(&mut self, took: Duration) {
+        self.canon_min = if self.canons == 0 { took } else { self.canon_min.min(took) };
+        self.canon_max = self.canon_max.max(took);
+        self.canons += 1;
+        self.canon_time += took;
     }
 }
 
@@ -631,7 +650,7 @@ impl StatsReporter {
         eprintln!(
             "[search-stats] search={} lemma={} final={} end={} root={} classes={} leaves={} \
              merges={} shared={} asleep={} skipped_asleep={} applied={} execs={} canons={} \
-             canon_s={:.3} busy_s={:.3} elapsed_s={:.3}",
+             canon_s={:.3} canon_min_s={:.6} canon_max_s={:.6} busy_s={:.3} elapsed_s={:.3}",
             self.search,
             lemma,
             u8::from(end.is_some()),
@@ -647,6 +666,8 @@ impl StatsReporter {
             work.execs,
             work.canons,
             work.canon_time.as_secs_f64(),
+            work.canon_min.as_secs_f64(),
+            work.canon_max.as_secs_f64(),
             work.busy.as_secs_f64(),
             self.started.elapsed().as_secs_f64(),
         );
@@ -708,8 +729,7 @@ pub(crate) fn canonical_key(
     let (canon, labelling) = canonicalize_constraint_system_with_labelling(sys)
         .unwrap_or_else(|e| panic!("TAM_RS_MERGE: canonicalizing a constraint system failed: {e}"));
     let key = fingerprint_constraint_system(&canon);
-    work.canons += 1;
-    work.canon_time += start.elapsed();
+    work.record_canon(start.elapsed());
     (key, labelling)
 }
 
