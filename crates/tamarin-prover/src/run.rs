@@ -529,7 +529,7 @@ fn run_interactive(args: &Args) -> Result<i32, RunError> {
     // worker and `spawn_blocking` threads.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(64 * 1024 * 1024)
+        .thread_stack_size(WORKER_STACK_BYTES)
         .build()
         .map_err(|e| RunError(format!("failed to build tokio runtime: {}", e)))?;
     runtime
@@ -2860,10 +2860,25 @@ fn init_rayon_pool(args: &Args) {
     // even if N matches.  We swallow the error: the first invocation
     // wins (which is the desired behaviour — RS runs `run_batch` once
     // per process, and tests install their own pool).
-    let _ = rayon::ThreadPoolBuilder::new()
+    let _ = rayon_pool_builder(n).build_global();
+}
+
+/// Stack size of every thread that runs proof search: the rayon workers and
+/// the interactive server's tokio threads.
+///
+/// Proof search runs on the rayon workers, not on the main thread, and
+/// recurses through the search tree and through every term it walks.  Deeply
+/// nested terms (SPDM's) need more than the 2 MiB rayon gives by default, and
+/// the overflow aborts the whole process.  GHC grows its stacks on the heap,
+/// so tamarin-prover has no such limit.  64 MiB is reserved address space,
+/// not memory: only the pages a thread touches are backed.
+const WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+fn rayon_pool_builder(n: usize) -> rayon::ThreadPoolBuilder {
+    rayon::ThreadPoolBuilder::new()
         .num_threads(n)
         .thread_name(|i| format!("tamarin-rayon-{}", i))
-        .build_global();
+        .stack_size(WORKER_STACK_BYTES)
 }
 
 fn default_maude_path() -> String {
@@ -2983,6 +2998,24 @@ mod tests {
     /// second `cargo test` is such a run.
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("tamarin_rs_{}_{}", name, std::process::id()))
+    }
+
+    /// The rayon workers must take a recursion far deeper than rayon's 2 MiB
+    /// default stack.  Too small a stack aborts the whole test binary with
+    /// "has overflowed its stack" instead of failing this test alone.
+    #[test]
+    fn rayon_workers_have_room_for_deep_recursion() {
+        fn recurse(depth: usize) -> u64 {
+            let frame = std::hint::black_box([depth as u8; 16 * 1024]);
+            if depth == 0 {
+                return frame[0] as u64;
+            }
+            recurse(depth - 1) + std::hint::black_box(frame[frame.len() - 1]) as u64
+        }
+        let pool = rayon_pool_builder(2).build().expect("build pool");
+        // 1024 frames of 16 KiB: 16 MiB, a quarter of WORKER_STACK_BYTES.
+        let total = pool.install(|| rayon::join(|| recurse(1024), || recurse(1024)));
+        assert_eq!(total.0, total.1);
     }
 
     #[test]
