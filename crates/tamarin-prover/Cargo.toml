@@ -26,7 +26,11 @@ tamarin-accountability = { workspace = true }
 # tamarin-export is a placeholder crate not yet wired into the driver; its dep
 # will be added here when that port lands.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-mimalloc = { version = "0.1", default-features = false }
+# rustfs-mimalloc 0.5.6 ships the unmodified mimalloc v3.5.3 sources. The
+# `mimalloc` crate (0.1.52) still ships v3.3.2, which can never create its
+# 16 GiB arena (mimalloc issue #1309), so a process aborted on a small
+# allocation at ~160 GiB RSS. Go back to `mimalloc` once it ships >= v3.4.
+mimalloc = { package = "rustfs-mimalloc", version = "=0.5.6" }
 rayon = { workspace = true }
 clap = { workspace = true }
 
