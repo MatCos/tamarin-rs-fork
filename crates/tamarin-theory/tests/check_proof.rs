@@ -109,7 +109,7 @@ fn replaying_the_autoprover_proof_gives_the_same_proof() {
 
 /// For an exists-trace lemma the autoprover keeps only the path to the
 /// trace, so the replay marks the other cases `sorry "Unhandled Case"`
-/// (unannotated, as HS does); the result still says TraceFound.
+/// (with their systems); the trace wins, the result still says TraceFound.
 #[test]
 fn replaying_a_trace_reports_trace_found() {
     let Some(session) = tutorial_session() else {
@@ -120,10 +120,8 @@ fn replaying_a_trace_reports_trace_found() {
     assert_eq!(proof_status(&checked), ProofStatus::TraceFound);
     let body = pretty_proof_body(&checked);
     assert!(body.contains("SOLVED // trace found"), "{body}");
-    assert!(
-        body.contains("by sorry /* Unhandled Case */ /* unannotated */"),
-        "{body}"
-    );
+    assert!(body.contains("by sorry /* Unhandled Case */"), "{body}");
+    assert!(!body.contains("/* unannotated */"), "{body}");
 }
 
 #[test]
@@ -163,8 +161,10 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
         path.iter().fold(n, |n, p| &n.children[p])
     }
 
-    // A case left out: it comes back as an unannotated `sorry`, which HS
-    // counts as Undetermined, so the whole proof still says Complete.
+    // A case left out: it comes back as a `sorry` with the case's system,
+    // so the proof is Incomplete. (The fork's HS handler left it without a
+    // system; Complete absorbed the resulting Undetermined and a proof with
+    // missing cases was reported Complete.)
     let mut missing = full.clone();
     let dropped = {
         let split = at(&mut missing, &path);
@@ -177,8 +177,8 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
     p.push(dropped);
     let n = node_at(&checked, &p);
     assert_eq!(n.method, ProofMethod::Sorry(Some("Unhandled Case".into())));
-    assert!(!n.annotated && n.children.is_empty());
-    assert_eq!(proof_status(&checked), ProofStatus::Complete);
+    assert!(n.annotated && n.children.is_empty());
+    assert_eq!(proof_status(&checked), ProofStatus::Incomplete);
 
     // A case the method does not produce: kept as given, without systems.
     let mut extra = full.clone();

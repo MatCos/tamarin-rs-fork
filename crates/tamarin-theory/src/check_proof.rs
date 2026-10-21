@@ -4,8 +4,14 @@
 
 //! Replay a proof given as a tree of proof methods — HS `checkProof`
 //! (Theory/Proof.hs) with the prover for unhandled cases fixed to
-//! `sorry (Just "Unhandled Case") Nothing`, as the TamRL fork's
+//! `sorry (Just "Unhandled Case") (Just sys)`, as the TamRL fork's
 //! `checkproof` handler calls it.
+//!
+//! The unhandled case keeps its system. The fork used to pass `Nothing`:
+//! the case then counted as `Undetermined`, which `Complete` absorbs, so a
+//! proof that left cases out was reported `CompleteProof`. With the system
+//! it is an annotated sorry, and the proof is `IncompleteProof` (unless a
+//! trace was found, which wins as before).
 //!
 //! [`crate::replay`] does the same for proofs parsed from a `.spthy` file,
 //! where each step has to be matched against the system by its text.
@@ -33,7 +39,7 @@ pub struct MethodTree {
 /// - a step that applies (`checkAndExecProofMethod`) keeps its method, and
 ///   its cases are merged with the cases the method produced: both →
 ///   replayed recursively; produced only → `sorry "Unhandled Case"`
-///   without a system; given only → kept without systems;
+///   with the case's system; given only → kept without systems;
 /// - a step that does not apply becomes `sorry "invalid proof step
 ///   encountered"` with the given subtree, without systems, as its single
 ///   unnamed case.
@@ -52,11 +58,13 @@ pub fn check_proof(ctx: &ProofContext, sys: System, proof: &MethodTree) -> Proof
             for (name, case_sys) in produced {
                 let child = match proof.cases.get(&name) {
                     Some(sub) => check_proof(ctx, case_sys, sub),
+                    // Keeps its system, so it counts as an annotated sorry
+                    // (`Incomplete`); see the module docs.
                     None => node(
                         ProofMethod::Sorry(Some("Unhandled Case".into())),
                         case_sys,
                         BTreeMap::new(),
-                        false,
+                        true,
                     ),
                 };
                 children.insert(name, child);

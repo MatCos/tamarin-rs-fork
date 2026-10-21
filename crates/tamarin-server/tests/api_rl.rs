@@ -282,6 +282,45 @@ async fn a_walked_proof_checks_as_complete() {
     }
 }
 
+/// Drop one case at the first case split of a walked proof.
+fn drop_a_case(tree: &mut Value) -> bool {
+    let children = tree["children"].as_object_mut().unwrap();
+    if children.len() > 1 {
+        let name = children.keys().next().unwrap().clone();
+        children.remove(&name);
+        return true;
+    }
+    children.values_mut().any(drop_a_case)
+}
+
+/// A proof that leaves a case out is incomplete, not complete: the TamRL
+/// agent once sent proofs whose cases belonged to another method, and the
+/// fork's handler reported them `CompleteProof`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proof_with_a_missing_case_checks_as_incomplete() {
+    if !maude_available() {
+        return;
+    }
+    let s = start_server_with_theory("Tutorial.spthy").await;
+    let lemma = "Client_auth";
+    let start = initial(&s, lemma).await;
+    let mut budget = 500;
+    let mut tree = walk(&s, lemma, start, &mut budget).await;
+    assert!(drop_a_case(&mut tree), "{lemma}'s proof has a case split");
+    let proof = serde_json::to_string(&tree).unwrap();
+    let (status, body) = post_form(
+        &s,
+        &lemma_url(&s, lemma, "check-proof"),
+        &[("proof", &proof)],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["proofStatus"], "IncompleteProof");
+    let file = body["proofFile"].as_str().unwrap();
+    assert!(file.contains("by sorry /* Unhandled Case */"), "{file}");
+}
+
 /// A theory whose prover could not be built (here: Maude did not start) is
 /// built again by the next request, not refused until a restart.
 #[cfg(unix)]
