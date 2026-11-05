@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Theory.Constraint.System.Graph.Abbreviation`.
 //!
@@ -14,15 +13,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tamarin_term::function_symbols::{
-    diff_sym, exp_sym, nat_one_sym, pair_sym, AcSym, CSym, FunSym, EMAP_SYM_STRING,
-};
+use tamarin_term::function_symbols::{CSym, FunSym};
 use tamarin_term::lterm::{LNTerm, LSort, LVar};
-use tamarin_term::pretty::{ac_op_symbol, pretty_lnterm};
+use tamarin_term::pretty::{pretty_lnterm, pretty_nterm};
 use tamarin_term::term::{is_pair, Term};
 use tamarin_term::vterm::Lit;
 
-use crate::pretty_hpj::{fcat, fsep, punctuate, Doc, DEFAULT_LINE_LENGTH, DEFAULT_RIBBON};
+use crate::pretty_hpj::{DEFAULT_LINE_LENGTH, DEFAULT_RIBBON};
 
 use crate::fact::LNFact;
 use crate::rule::{IntrRuleACInfo, ProtoRuleACInstInfo, ProtoRuleName, RuleACInst, RuleInfo};
@@ -33,7 +30,7 @@ use super::repr::{GraphRepr, NodeType};
 // Options
 // ---------------------------------------------------------------------
 
-/// Mirror of `AbbreviationOptions` (Abbreviation.hs:56-62).
+/// Mirror of `AbbreviationOptions` (Abbreviation.hs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbbreviationOptions {
     /// Soft cap on the number of abbreviations to generate, unless
@@ -49,6 +46,7 @@ pub struct AbbreviationOptions {
     pub prefix_length: usize,
 }
 
+/// HS `defaultAbbreviationOptions` (Abbreviation.hs).
 impl Default for AbbreviationOptions {
     fn default() -> Self {
         AbbreviationOptions {
@@ -114,7 +112,7 @@ pub fn apply_abbreviations_fact(lookup: &dyn Fn(&LNTerm) -> Option<LNTerm>, fa: 
 // Term-prefix extraction
 // ---------------------------------------------------------------------
 
-/// `getTermPrefix` (Abbreviation.hs:106-115).
+/// `getTermPrefix` (Abbreviation.hs).
 fn get_term_prefix(opts: &AbbreviationOptions, t: &LNTerm) -> String {
     let raw = match t {
         Term::Lit(Lit::Var(v)) => v.name.to_string(),
@@ -136,7 +134,7 @@ fn get_term_prefix(opts: &AbbreviationOptions, t: &LNTerm) -> String {
 type PrefixMap = BTreeMap<String, u32>;
 
 /// Generate one fresh abbreviation name for a candidate term.
-/// Mirror of `abbreviateTerm` (Abbreviation.hs:122-149).
+/// Mirror of `abbreviateTerm` (Abbreviation.hs).
 ///
 /// Returns the new prefix-index map and the abbreviation as an `LNTerm`
 /// (a Msg-sort variable).
@@ -160,9 +158,6 @@ fn abbreviate_term(
             let v = LVar::new(candidate, LSort::Msg, 0);
             return (prefix_map, Term::Lit(Lit::Var(v)));
         }
-        if tamarin_utils::env_gate!("TAM_RS_DBG_ABBREV") {
-            eprintln!("collision: {}", candidate);
-        }
         idx += 1;
     }
 }
@@ -171,7 +166,7 @@ fn abbreviate_term(
 /// alphanumeric runs (uppercased, sorted, deduped).  Used to avoid
 /// generating an abbreviation name that aliases an existing identifier.
 ///
-/// Mirrors Haskell `allNames` (Abbreviation.hs:220-225): `sort . nub . map
+/// Mirrors Haskell `allNames` (Abbreviation.hs): `sort . nub . map
 /// toUpper . T.split (not . isAlphaNum) $ show repr`.  `show repr` is the
 /// DERIVED Show of the whole `GraphRepr`, which for a `SystemNode` renders
 /// the rule's `_rInfo` — exposing the RAW `StandRule "<name>"` string, the
@@ -246,7 +241,7 @@ fn dump_rule(buf: &mut String, ru: &RuleACInst) {
 /// Emit the user-controlled name/role tokens that derived `Show` of a
 /// rule's `_rInfo` exposes (`RuleAttributes`, `ProtoRuleName`,
 /// `ProtoRuleACInstInfo` and `IntrRuleACInfo`, all `deriving Show` —
-/// Theory/Model/Rule.hs:367-379,413-416,444-449,539-553): the raw
+/// Theory/Model/Rule.hs): the raw
 /// `StandRule "<name>"` string, the `role = Just "<role>"` string, and the
 /// intruder `ConstrRule`/`DestrRule "<name>"` byte string.
 fn dump_rule_info(buf: &mut String, info: &RuleInfo<ProtoRuleACInstInfo, IntrRuleACInfo>) {
@@ -357,7 +352,7 @@ fn sub_terms_no_pair(t: &LNTerm, out: &mut Vec<LNTerm>) {
 // Weight
 // ---------------------------------------------------------------------
 
-/// `length $ render $ prettyLNTerm t` (Abbreviation.hs:88-92) — the term
+/// `length $ render $ prettyLNTerm t` (Abbreviation.hs) — the term
 /// size that feeds `judgeTerm`'s weight.
 ///
 /// HS `render` is HughesPJ `P.render`, i.e. the library DEFAULT style
@@ -374,108 +369,13 @@ fn sub_terms_no_pair(t: &LNTerm, out: &mut Vec<LNTerm>) {
 /// verified `pretty_hpj` port) at HS `render`'s default widths
 /// (`DEFAULT_LINE_LENGTH`/`DEFAULT_RIBBON` = 100/67).
 fn rendered_term_len(t: &LNTerm) -> usize {
-    lnterm_doc(t)
+    pretty_nterm(t)
         .render_with(DEFAULT_LINE_LENGTH, DEFAULT_RIBBON)
         .chars()
         .count()
 }
 
-/// HS `prettyLNTerm` = `prettyTerm (text . show)` as a HughesPJ `Doc`
-/// (Term/Term.hs:298-327), built directly on `LNTerm`.
-///
-/// tamarin-theory has the same Doc under `pretty_formula::term_doc`, reached
-/// through the parser-AST projection `pretty_theory::lnterm_to_parser`; going
-/// that way from here would convert every rendered term through the parser
-/// AST — so the (small, closed) `ppTerm` case split is mirrored here instead,
-/// using `pretty_hpj`'s public combinators.  Case order and Doc shape follow
-/// Term.hs exactly:
-///   - literals: `text (show l)` — one unbreakable token (the single-line
-///     `pretty_lnterm` of a literal IS `show l`);
-///   - AC:   `ppTerms (ppACOp o) 1 "(" ")" ts`;
-///   - exp:  `t1 <> "^" <> t2`; diff: `"diff" <> "(" <> t1 <> ", " <> t2 <> ")"`;
-///   - %1:   `text "%1"`; pairs: `ppTerms ", " 1 "<" ">" (split t)`;
-///   - nullary NoEq: `text f`; other NoEq / EMap / LIST: `ppFun`.
-fn lnterm_doc(t: &LNTerm) -> Doc {
-    match t {
-        Term::Lit(_) => Doc::text(pretty_lnterm(t)),
-        // #883 prettyTerm: a nullary user-AC application prints as the bare
-        // symbol name (n-ary ones go through the generic AC arm below).
-        Term::App(FunSym::Ac(AcSym::AcFct(s)), ts) if ts.is_empty() => {
-            Doc::text(String::from_utf8_lossy(s.name))
-        }
-        Term::App(FunSym::Ac(o), ts) => {
-            pp_terms(ac_op_symbol(*o), 1, "(", ")", ts.iter().collect())
-        }
-        Term::App(FunSym::NoEq(sym), ts) if ts.len() == 2 && *sym == exp_sym() => {
-            lnterm_doc(&ts[0])
-                .beside(Doc::text("^"))
-                .beside(lnterm_doc(&ts[1]))
-        }
-        Term::App(FunSym::NoEq(sym), ts) if ts.len() == 2 && *sym == diff_sym() => {
-            Doc::text("diff")
-                .beside(Doc::text("("))
-                .beside(lnterm_doc(&ts[0]))
-                .beside(Doc::text(", "))
-                .beside(lnterm_doc(&ts[1]))
-                .beside(Doc::text(")"))
-        }
-        Term::App(FunSym::NoEq(sym), ts) if ts.is_empty() && *sym == nat_one_sym() => {
-            Doc::text("%1")
-        }
-        Term::App(FunSym::NoEq(sym), _) if *sym == pair_sym() => {
-            let mut flat: Vec<&LNTerm> = Vec::new();
-            split_pair(t, &mut flat);
-            pp_terms(", ", 1, "<", ">", flat)
-        }
-        Term::App(FunSym::NoEq(sym), ts) if ts.is_empty() => {
-            Doc::text(String::from_utf8_lossy(sym.name))
-        }
-        Term::App(FunSym::NoEq(sym), ts) => pp_fun(&String::from_utf8_lossy(sym.name), ts),
-        Term::App(FunSym::C(CSym::EMap), ts) => {
-            pp_fun(&String::from_utf8_lossy(EMAP_SYM_STRING), ts)
-        }
-        Term::App(FunSym::List, ts) => pp_fun("LIST", ts),
-    }
-}
-
-/// HS `ppTerms sepa n lead finish ts` (Term/Term.hs:319-321):
-/// `fcat . (text lead :) . (++[text finish]) . map (nest n)
-///       . punctuate (text sepa) . map ppTerm`.
-fn pp_terms(sepa: &str, n: isize, lead: &str, finish: &str, ts: Vec<&LNTerm>) -> Doc {
-    let docs: Vec<Doc> = ts.into_iter().map(lnterm_doc).collect();
-    let items = punctuate(Doc::text(sepa), docs);
-    let mut all: Vec<Doc> = Vec::with_capacity(items.len() + 2);
-    all.push(Doc::text(lead));
-    for d in items {
-        all.push(d.nest(n));
-    }
-    all.push(Doc::text(finish));
-    fcat(all)
-}
-
-/// HS `ppFun f ts` (Term/Term.hs:326-327):
-/// `text (f++"(") <> fsep (punctuate comma (map ppTerm ts)) <> text ")"`.
-fn pp_fun(f: &str, ts: &[LNTerm]) -> Doc {
-    let docs: Vec<Doc> = ts.iter().map(lnterm_doc).collect();
-    Doc::text(format!("{}(", f))
-        .beside(fsep(punctuate(Doc::text(","), docs)))
-        .beside(Doc::text(")"))
-}
-
-/// HS `split` (Term/Term.hs:323-324): flatten a right-nested pair spine.
-/// `viewTerm2 -> FPair` requires exactly two arguments AND full `NoEqSym`
-/// equality with `pairSym`.
-fn split_pair<'a>(t: &'a LNTerm, out: &mut Vec<&'a LNTerm>) {
-    match t {
-        Term::App(FunSym::NoEq(sym), ts) if ts.len() == 2 && *sym == pair_sym() => {
-            out.push(&ts[0]);
-            split_pair(&ts[1], out);
-        }
-        _ => out.push(t),
-    }
-}
-
-/// Mirror of `judgeTerm` (Abbreviation.hs:79-101).
+/// Mirror of `judgeTerm` (Abbreviation.hs).
 fn judge_term(
     abbrevs: &BTreeMap<LNTerm, LNTerm>,
     t: &LNTerm,
@@ -503,7 +403,7 @@ fn judge_term(
 // Main entry point
 // ---------------------------------------------------------------------
 
-/// Mirror of `computeAbbreviations` (Abbreviation.hs:166-254).
+/// Mirror of `computeAbbreviations` (Abbreviation.hs).
 pub fn compute_abbreviations(repr: &GraphRepr, opts: &AbbreviationOptions) -> Abbreviations {
     // Step 1: collect all terms and their occurrence counts.
     let terms = collect_all_terms(repr);
@@ -513,11 +413,6 @@ pub fn compute_abbreviations(repr: &GraphRepr, opts: &AbbreviationOptions) -> Ab
         entry.0 += 1;
     }
     let all_names = collect_all_names(repr);
-    let dbg = tamarin_utils::env_gate!("TAM_RS_DBG_ABBREV");
-    if dbg {
-        let joined: Vec<&str> = all_names.iter().map(|s| s.as_str()).collect();
-        eprintln!("allNames: {}", joined.join(" "));
-    }
     let mut abbrevs: BTreeMap<LNTerm, LNTerm> = BTreeMap::new();
     let mut prefix_map: PrefixMap = BTreeMap::new();
     // Iteratively pick the best candidate.
@@ -538,7 +433,7 @@ pub fn compute_abbreviations(repr: &GraphRepr, opts: &AbbreviationOptions) -> Ab
         let mut best: Option<(&LNTerm, i64)> = None;
         for (t, (occs, legend_occs)) in term_occs.iter() {
             let w = judge_term(&abbrevs, t, *occs, legend_occs);
-            if w > 0 && best.map_or(true, |(_, bw)| w > bw) {
+            if w > 0 && best.is_none_or(|(_, bw)| w > bw) {
                 best = Some((t, w));
             }
         }
@@ -547,24 +442,10 @@ pub fn compute_abbreviations(repr: &GraphRepr, opts: &AbbreviationOptions) -> Ab
             None => break,
         };
         if weight < opts.always_abbrev_weight && abbrevs.len() >= opts.abbrevs_soft_limit {
-            if dbg {
-                eprintln!("stop: weight={} nabbrevs={}", weight, abbrevs.len());
-            }
             break;
         }
         let (new_pmap, abbrev_name) = abbreviate_term(opts, &all_names, prefix_map, &candidate);
         prefix_map = new_pmap;
-        if dbg {
-            let lookup = |k: &LNTerm| abbrevs.get(k).cloned();
-            let replaced = apply_abbreviations_term(&lookup, &candidate);
-            eprintln!(
-                "pick: weight={} len={} name={} term={}",
-                weight,
-                rendered_term_len(&replaced),
-                pretty_lnterm(&abbrev_name),
-                pretty_lnterm(&candidate)
-            );
-        }
         // Decrement subterm counts in legend_occs for every other term.
         // Drop the chosen candidate, then push one sub-count onto each
         // surviving entry in place — `iter_mut` visits keys in the same
@@ -603,7 +484,7 @@ pub fn compute_abbreviations(repr: &GraphRepr, opts: &AbbreviationOptions) -> Ab
 // Ordering for the legend / JSON export
 // ---------------------------------------------------------------------
 
-/// Mirror Haskell `topoSortAbbrevs` (System/Dot.hs:421-436 and System/Dot.hs:484-499).
+/// Mirror Haskell `topoSortAbbrevs` (System/Dot.hs and System/Dot.hs).
 ///
 /// `entries` is the descending-name-sorted list of `(name, expansion)`.
 /// We build a graph with an edge `v -> u` whenever `entries[v].0` is a
@@ -658,7 +539,7 @@ fn topo_sort_abbrevs(entries: &[(&LNTerm, &LNTerm)]) -> Vec<usize> {
     postorder
 }
 
-/// Port of `orderAbbreviationsForJSON` (System/Dot.hs:417-436).
+/// Port of `orderAbbreviationsForJSON` (System/Dot.hs).
 ///
 /// `M.toList abbrevs` is the ascending-`LNTerm`-key iteration order of the
 /// [`Abbreviations`] `BTreeMap`; `sortOn (Down . render . prettyLNTerm . fst
@@ -706,7 +587,7 @@ fn apply_proper_subterms(lookup: &dyn Fn(&LNTerm) -> Option<LNTerm>, t: &LNTerm)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tamarin_term::function_symbols::{Constructability, NoEqSym, Privacy};
+    use tamarin_term::function_symbols::NoEqSym;
     use tamarin_term::lterm::{LSort, LVar};
     use tamarin_term::term::{f_app_no_eq, lit};
 
@@ -715,12 +596,7 @@ mod tests {
     }
 
     fn senc_sym() -> NoEqSym {
-        NoEqSym::new(
-            b"senc".to_vec(),
-            2,
-            Privacy::Public,
-            Constructability::Constructor,
-        )
+        tamarin_term::builtin::senc_sym()
     }
 
     #[test]

@@ -4,39 +4,37 @@
 //! with `check_proof`.
 //!
 //! Skips without maude only when `TAM_ALLOW_NO_MAUDE=1` (see
-//! `common::maude_path`).
+//! `tamarin_test_support::require_maude_path`).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
+use tamarin_term::maude_proc::MaudeHandle;
 use tamarin_theory::check_proof::{check_proof, MethodTree};
-use tamarin_theory::constraint::solver::context::CutStrategy;
 use tamarin_theory::constraint::solver::proof_method::{ProofMethod, Result as MethodResult};
 use tamarin_theory::constraint::solver::search::{
-    proof_size, proof_status, ranked_methods, set_sys_retention, ProofNode, ProofStatus,
-    SysRetention,
+    proof_size, proof_status, ranked_methods, ProofNode, ProofStatus, SysRetention,
 };
 use tamarin_theory::pretty_theory::pretty_proof_body;
-use tamarin_theory::prove::{prove_lemma_in_session, CliHeuristic, ProverSession};
-
-mod common;
+use tamarin_theory::prove::{prove_lemma_in_session, ProverSession, ProverSessionOptions};
 
 fn tutorial_session() -> Option<ProverSession> {
+    let maude_path = tamarin_test_support::require_maude_path()?;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tamarin-prover/examples/Tutorial.spthy");
+    let source = std::fs::read_to_string(path).expect("read theory");
+    let parsed = tamarin_parser::parse_theory(&source, &[]).expect("parse theory");
+    let theory = tamarin_theory::elaborate::elaborate(&parsed).expect("elaborate");
+    let maude = MaudeHandle::start(&maude_path, theory.signature.clone())
+        .unwrap_or_else(|e| panic!("maude at {maude_path} failed to start: {e:?}"));
     // Keep the autoprover's systems, so its root can be compared with the
-    // start system (the server sets the same, `init_process_globals`).
-    set_sys_retention(SysRetention::KeepAll);
-    let (parsed, _, maude) = common::load_theory_with_maude(&common::tutorial_theory_path())?;
-    Some(
-        ProverSession::build_with_in_file_and_heuristic(
-            &parsed,
-            maude,
-            None,
-            "",
-            CliHeuristic::default(),
-            CutStrategy::Dfs,
-            None,
-        )
-        .expect("session"),
-    )
+    // start system (the server keeps them too).
+    let options = ProverSessionOptions {
+        sys_retention: SysRetention::KeepAll,
+        ..ProverSessionOptions::default()
+    };
+    Some(ProverSession::build(Arc::new(theory), maude, options).expect("session"))
 }
 
 /// The methods of a proof tree, as a client would send them back.
@@ -61,10 +59,9 @@ fn lemma_start_is_the_system_the_prover_starts_from() {
         return;
     };
     for lemma in ["Client_auth", "Client_session_key_honest_setup"] {
-        let start = session.lemma_initial_system(lemma).expect("start");
+        let (ctx, start) = session.context_and_system_for_lemma(lemma).expect("start");
         assert!(start == auto_proof(&session, lemma).sys, "{lemma}");
-        let ctx = session.lemma_context(lemma).expect("ctx");
-        let methods = ranked_methods(&start, &ctx, 0);
+        let methods = ranked_methods(&start, &ctx, 0).expect("ranked methods");
         assert!(
             methods.contains(&ProofMethod::Simplify),
             "{lemma}: {methods:?}"
@@ -74,15 +71,15 @@ fn lemma_start_is_the_system_the_prover_starts_from() {
             "{lemma}: {methods:?}"
         );
     }
-    assert!(session.lemma_initial_system("no_such_lemma").is_err());
-    assert!(session.lemma_context("no_such_lemma").is_err());
+    assert!(session
+        .context_and_system_for_lemma("no_such_lemma")
+        .is_err());
 }
 
 fn replay_auto_proof(session: &ProverSession, lemma: &str) -> (ProofNode, ProofNode) {
     let auto = auto_proof(session, lemma);
-    let ctx = session.lemma_context(lemma).expect("ctx");
-    let start = session.lemma_initial_system(lemma).expect("start");
-    let checked = check_proof(&ctx, start, &methods_of(&auto));
+    let (ctx, start) = session.context_and_system_for_lemma(lemma).expect("start");
+    let checked = check_proof(&ctx, start, &methods_of(&auto)).expect("check proof");
     (auto, checked)
 }
 
@@ -131,8 +128,8 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
     };
     let lemma = "Client_auth";
     let auto = auto_proof(&session, lemma);
-    let ctx = session.lemma_context(lemma).expect("ctx");
-    let start = || session.lemma_initial_system(lemma).expect("start");
+    let (ctx, start_sys) = session.context_and_system_for_lemma(lemma).expect("start");
+    let start = || start_sys.clone();
     let full = methods_of(&auto);
 
     // A node with several cases, as a path of case names from the root.
@@ -172,7 +169,7 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
         split.cases.remove(&name);
         name
     };
-    let checked = check_proof(&ctx, start(), &missing);
+    let checked = check_proof(&ctx, start(), &missing).expect("check proof");
     let mut p = path.clone();
     p.push(dropped);
     let n = node_at(&checked, &p);
@@ -189,7 +186,7 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
     at(&mut extra, &path)
         .cases
         .insert("no_such_case".into(), leaf.clone());
-    let checked = check_proof(&ctx, start(), &extra);
+    let checked = check_proof(&ctx, start(), &extra).expect("check proof");
     p = path.clone();
     p.push("no_such_case".into());
     let n = node_at(&checked, &p);
@@ -203,7 +200,7 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
         method: ProofMethod::Finished(MethodResult::Solved),
         cases: full.cases.clone(),
     };
-    let checked = check_proof(&ctx, start(), &invalid);
+    let checked = check_proof(&ctx, start(), &invalid).expect("check proof");
     assert_eq!(
         checked.method,
         ProofMethod::Sorry(Some("invalid proof step encountered".into()))
@@ -219,7 +216,7 @@ fn missing_extra_and_invalid_steps_follow_check_proof() {
         method: ProofMethod::Sorry(None),
         cases: full.cases.clone(),
     };
-    let checked = check_proof(&ctx, start(), &sorry);
+    let checked = check_proof(&ctx, start(), &sorry).expect("check proof");
     assert!(checked.annotated);
     assert!(checked.children.values().all(|c| !c.annotated));
     assert_eq!(proof_status(&checked), ProofStatus::Incomplete);

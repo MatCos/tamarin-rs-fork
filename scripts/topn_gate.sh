@@ -19,8 +19,6 @@
 #
 # Files a mode cannot compare are left out up front and listed, never silently
 # dropped:
-#   - SAPIC theories when merging is on: merging accepts them, but the gates
-#     have not been run on them yet;
 #   - `--stop-on-trace` files in `top1`: the top-N search ignores the cut
 #     strategy, so its N = 1 run is the default Dfs search, not the one asked for;
 #   - `--diff` files in `replay`: the port has no diff-mode prover.
@@ -74,7 +72,7 @@ BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
 # The variables that switch the top-N search on. A gate run that inherits one
 # of them from the caller's shell would test something other than it claims.
-TOPN_VARS=(TAM_RS_TOP_METHODS TAM_RS_MERGE TAM_RS_TOPN_BATCH TAM_RS_SEARCH_ORDER TAM_RS_TOPN_ALT_COST TAM_RS_TOPN_STATS)
+TOPN_VARS=(TAM_RS_TOP_METHODS TAM_RS_MERGE TAM_RS_TOPN_BATCH TAM_RS_SEARCH_ORDER TAM_RS_TOPN_STATS)
 for v in "${TOPN_VARS[@]}"; do
     if [ -n "${!v+x}" ]; then
         echo "topn_gate: $v is set in the environment; unset it (the gate sets what each run needs)" >&2
@@ -84,10 +82,6 @@ done
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/topn_gate.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
-
-# is_sapic <relpath>: the theory has a top-level process (what `Theory::is_sapic`
-# records from the parser: exactly one `process:` item).
-is_sapic() { grep -qE '^[[:space:]]*process[[:space:]]*:' "$CORPUS/$1"; }
 
 # select_files <mode>: the allowlist minus what <mode> cannot compare, into
 # $WORK/files.txt; the left-out files and the reason go to $WORK/skipped.tsv.
@@ -101,9 +95,6 @@ select_files() {
         fi
         if [ "$mode" = replay ] && [[ " $fl " == *" --diff "* ]]; then
             printf '%s\tdiff mode (no diff-mode prover)\n' "$rel" >> "$WORK/skipped.tsv"; continue
-        fi
-        if [ "${MERGE:-1}" = 1 ] && [ -f "$CORPUS/$rel" ] && is_sapic "$rel"; then
-            printf '%s\tSAPIC (not yet gated with merging)\n' "$rel" >> "$WORK/skipped.tsv"; continue
         fi
         printf '%s\n' "$rel" >> "$WORK/files.txt"
     done < <(grep -v '^[[:space:]]*#' "$ALLOWLIST" | grep . | sort -u)

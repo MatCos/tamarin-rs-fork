@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Sapic.Facts` (`lib/sapic/src/Sapic/Facts.hs`) — the
 //! translation-specific fact/action types (`TransFact` / `TransAction`), their
@@ -9,22 +8,25 @@
 //! `ProtoRuleE` with HS-exact name / color / process / role attributes.
 
 use tamarin_term::lterm::{LNTerm, LVar};
-use tamarin_term::vterm::{Lit, VTerm};
+use tamarin_term::vterm::var_term;
 use tamarin_utils::color::{hsv_to_rgb, rgb_to_hsv, Hsv, Rgb};
 
 use tamarin_theory::fact::{fresh_fact, in_fact, out_fact, proto_fact, LNFact, Multiplicity};
+use tamarin_theory::formula::SyntacticLNFormula;
 use tamarin_theory::pretty_sapic::pretty_sapic_top_level;
 use tamarin_theory::rule::{ProtoRuleE, ProtoRuleEInfo, ProtoRuleName, Rule, RuleAttributes};
 use tamarin_theory::sapic::{
     pretty_position, GoodAnnotation, PlainProcess, Process, ProcessPosition, SapicLVar,
 };
 
-use crate::annotation::ProcessAnnotation;
+use crate::annotation::{to_parsed, ProcessAnnotation};
 
 // =============================================================================
-// StateKind (Facts.hs:93-94) / TransFact (96-109) / TransAction (55-81)
+// StateKind (Facts.hs) / TransFact / TransAction
 // =============================================================================
 
+// `pub` keeps the dead-code lint off `PState`: HS declares the variant
+// (Facts.hs) but never constructs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateKind {
     LState,
@@ -34,12 +36,12 @@ pub enum StateKind {
 }
 
 impl StateKind {
-    /// `isSemiState` (Facts.hs:148-152).
-    pub fn is_semi_state(self) -> bool {
+    /// `isSemiState` (Facts.hs).
+    pub(crate) fn is_semi_state(self) -> bool {
         matches!(self, StateKind::LSemiState | StateKind::PSemiState)
     }
-    /// `multiplicity` (Facts.hs:166-170).
-    pub fn multiplicity(self) -> Multiplicity {
+    /// `multiplicity` (Facts.hs).
+    pub(crate) fn multiplicity(self) -> Multiplicity {
         match self {
             StateKind::LState | StateKind::LSemiState => Multiplicity::Linear,
             StateKind::PState | StateKind::PSemiState => Multiplicity::Persistent,
@@ -47,101 +49,101 @@ impl StateKind {
     }
 }
 
-/// `TransFact` (Facts.hs:96-109) — premise/conclusion facts.  Every
+/// `TransFact` (Facts.hs) — premise/conclusion facts.  Every
 /// constructor is wired through `factToFact`.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TransFact {
+pub(crate) enum TransFact {
     Fr(LVar),
     In(LNTerm),
     Out(LNTerm),
     State(StateKind, ProcessPosition, Vec<LVar>),
     /// A literal user MSR fact (`TamarinFact`).
     TamarinFact(LNFact),
-    /// `PureCell t1 t2` (Facts.hs:96-109, see line 108): `L_PureState( t1, t2 )` — the pure-state
+    /// `PureCell t1 t2` (Facts.hs): `L_PureState( t1, t2 )` — the pure-state
     /// cell content (used only when the state-channel optimisation is enabled).
     PureCell(LNTerm, LNTerm),
-    /// `CellLocked t1 t2` (Facts.hs:96-109, see line 109): `L_CellLocked( t1, t2 )` — the
+    /// `CellLocked t1 t2` (Facts.hs): `L_CellLocked( t1, t2 )` — the
     /// pure-state lock token.
     CellLocked(LNTerm, LNTerm),
-    /// `FLet p t vars` (Facts.hs:96-109, see line 100): `Let_<pos>( t, v1, .., vn )` — the
+    /// `FLet p t vars` (Facts.hs): `Let_<pos>( t, v1, .., vn )` — the
     /// intermediate fact a `let` combinator threads its RHS / matched LHS
-    /// through (Basetranslation.hs:252-277).  `vars` are the bound variables in
+    /// through (Basetranslation.hs).  `vars` are the bound variables in
     /// scope (rendered sorted, like `State`).
     FLet(ProcessPosition, LNTerm, Vec<LVar>),
-    /// `Message t t'` (Facts.hs:96-109, see line 101): `Message( c, m )` — a message in transit
+    /// `Message t t'` (Facts.hs): `Message( c, m )` — a message in transit
     /// on a private channel (Basetranslation.hs ChIn/ChOut with a channel).
     Message(LNTerm, LNTerm),
-    /// `Ack t t'` (Facts.hs:96-109, see line 102): `Ack( c, m )` — the synchronous acknowledgement
+    /// `Ack t t'` (Facts.hs): `Ack( c, m )` — the synchronous acknowledgement
     /// for a private-channel message (non-async-channels case).
     Ack(LNTerm, LNTerm),
-    /// `MessageIDSender p` (Facts.hs:96-109, see line 104, 262): `MID_Sender( ~mid_<pos> )` — the
+    /// `MessageIDSender p` (Facts.hs): `MID_Sender( ~mid_<pos> )` — the
     /// reliable-channel sender message-id fact.
     MessageIDSender(ProcessPosition),
-    /// `MessageIDReceiver p` (Facts.hs:96-109, see line 105, 263): `MID_Receiver( ~mid_<pos> )` —
+    /// `MessageIDReceiver p` (Facts.hs): `MID_Receiver( ~mid_<pos> )` —
     /// the reliable-channel receiver message-id fact.
     MessageIDReceiver(ProcessPosition),
 }
 
-/// `TransAction` (Facts.hs:55-81) — action facts.  Every constructor is wired
+/// `TransAction` (Facts.hs) — action facts.  Every constructor is wired
 /// through `actionToFact`.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TransAction {
+pub(crate) enum TransAction {
     InitEmpty,
     EventEmpty,
     /// A literal user action fact (`TamarinAct`).
     TamarinAct(LNFact),
-    /// `PredicateA f` (Facts.hs:55-81, see line 74): renders `f` with its name prefixed by
+    /// `PredicateA f` (Facts.hs): renders `f` with its name prefixed by
     /// `Pred_` (used by the positive arm of `if t1 = t2`).
     PredicateA(LNFact),
-    /// `NegPredicateA f` (Facts.hs:55-81, see line 75): renders `f` with its name prefixed by
+    /// `NegPredicateA f` (Facts.hs): renders `f` with its name prefixed by
     /// `Pred_Not_` (the negative arm of `if t1 = t2`).
     NegPredicateA(LNFact),
     // --- mutable state (Facts.hs) ---
-    /// `IsIn t v` (Facts.hs:213-234, see line 220): `IsIn( t, v )` — the lookup-found action.
+    /// `IsIn t v` (Facts.hs): `IsIn( t, v )` — the lookup-found action.
     IsIn(LNTerm, LVar),
-    /// `IsNotSet t` (Facts.hs:213-234, see line 221): `IsNotSet( t )` — the lookup-not-found action.
+    /// `IsNotSet t` (Facts.hs): `IsNotSet( t )` — the lookup-not-found action.
     IsNotSet(LNTerm),
-    /// `InsertA t1 t2` (Facts.hs:213-234, see line 222): `Insert( t1, t2 )`.
+    /// `InsertA t1 t2` (Facts.hs): `Insert( t1, t2 )`.
     InsertA(LNTerm, LNTerm),
-    /// `DeleteA t` (Facts.hs:213-234, see line 223): `Delete( t )`.
+    /// `DeleteA t` (Facts.hs): `Delete( t )`.
     DeleteA(LNTerm),
     // --- locks (Facts.hs) ---
-    /// `LockNamed t v` (Facts.hs:213-234, see line 228): `Lock_<idx v>( '<idx v>', v, t )`.
+    /// `LockNamed t v` (Facts.hs): `Lock_<idx v>( '<idx v>', v, t )`.
     LockNamed(LNTerm, LVar),
-    /// `LockUnnamed t v` (Facts.hs:213-234, see line 229): `Lock( '<idx v>', v, t )`.
+    /// `LockUnnamed t v` (Facts.hs): `Lock( '<idx v>', v, t )`.
     LockUnnamed(LNTerm, LVar),
-    /// `UnlockNamed t v` (Facts.hs:213-234, see line 230): `Unlock_<idx v>( '<idx v>', v, t )`.
+    /// `UnlockNamed t v` (Facts.hs): `Unlock_<idx v>( '<idx v>', v, t )`.
     UnlockNamed(LNTerm, LVar),
-    /// `UnlockUnnamed t v` (Facts.hs:213-234, see line 231): `Unlock( '<idx v>', v, t )`.
+    /// `UnlockUnnamed t v` (Facts.hs): `Unlock( '<idx v>', v, t )`.
     UnlockUnnamed(LNTerm, LVar),
-    /// `ChannelIn t` (Facts.hs:55-81, see line 69, 224): `ChannelIn( t )` — emitted by `in`
+    /// `ChannelIn t` (Facts.hs): `ChannelIn( t )` — emitted by `in`
     /// actions when the theory has a lemma needing the `in_event` restriction
     /// (`needsAssImmediate`).
     ChannelIn(LNTerm),
-    /// `ProgressFrom p` (Facts.hs:55-81, see line 77, 232): `ProgressFrom_<pos>( ~prog_<pos> )`.
+    /// `ProgressFrom p` (Facts.hs): `ProgressFrom_<pos>( ~prog_<pos> )`.
     ProgressFrom(ProcessPosition),
-    /// `ProgressTo p pf` (Facts.hs:55-81, see line 78, 233): `ProgressTo_<pos>( ~prog_<pf> )` —
+    /// `ProgressTo p pf` (Facts.hs): `ProgressTo_<pos>( ~prog_<pf> )` —
     /// the action is named for `p` but carries the progress variable of `pf`
     /// (the inverse position, for verification speedup).
     ProgressTo(ProcessPosition, ProcessPosition),
-    /// `Send p t` (Facts.hs:55-81, see line 80, 218): `Send( ~mid_<pos>, t )` — reliable-channel
+    /// `Send p t` (Facts.hs): `Send( ~mid_<pos>, t )` — reliable-channel
     /// send action.
     Send(ProcessPosition, LNTerm),
-    /// `Receive p t` (Facts.hs:55-81, see line 81, 219): `Receive( ~mid_<pos>, t )` —
+    /// `Receive p t` (Facts.hs): `Receive( ~mid_<pos>, t )` —
     /// reliable-channel receive action.
     Receive(ProcessPosition, LNTerm),
 }
 
-/// `SpecialPosition` (Facts.hs:111-113).
+/// `SpecialPosition` (Facts.hs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpecialPosition {
+pub(crate) enum SpecialPosition {
     InitPosition,
     NoPosition,
 }
 
 /// `Either ProcessPosition SpecialPosition`.
 #[derive(Debug, Clone, PartialEq)]
-pub enum RulePosition {
+pub(crate) enum RulePosition {
     Pos(ProcessPosition),
     Special(SpecialPosition),
 }
@@ -159,13 +161,13 @@ fn sorted_unique(mut vs: Vec<LVar>) -> Vec<LVar> {
 }
 
 // =============================================================================
-// actionToFact (Facts.hs:213-234) / factToFact (253-270)
+// actionToFact (Facts.hs) / factToFact
 // =============================================================================
 
-/// `factToFact` (Facts.hs:253-270).
-pub fn fact_to_fact(f: &TransFact) -> LNFact {
+/// `factToFact` (Facts.hs).
+pub(crate) fn fact_to_fact(f: &TransFact) -> LNFact {
     match f {
-        TransFact::Fr(v) => fresh_fact(VTerm::Lit(Lit::Var(*v))),
+        TransFact::Fr(v) => fresh_fact(var_term(*v)),
         TransFact::In(t) => in_fact(t.clone()),
         TransFact::Out(t) => out_fact(t.clone()),
         TransFact::State(kind, p, vars) => {
@@ -177,182 +179,176 @@ pub fn fact_to_fact(f: &TransFact) -> LNFact {
             let full = format!("{}_{}", name, pretty_position(p));
             let ts: Vec<LNTerm> = sorted_unique(vars.clone())
                 .into_iter()
-                .map(|v| VTerm::Lit(Lit::Var(v)))
+                .map(var_term)
                 .collect();
             // multiplicity from the state kind.
             proto_fact_mult(kind.multiplicity(), &full, ts)
         }
         TransFact::TamarinFact(f) => f.clone(),
         // `factToFact (PureCell t1 t2) = protoFact Linear "L_PureState" [t1, t2]`
-        // (Facts.hs:253-270, see line 269).
+        // (Facts.hs).
         TransFact::PureCell(t1, t2) => proto_fact(
             Multiplicity::Linear,
             "L_PureState",
             vec![t1.clone(), t2.clone()],
         ),
         // `factToFact (CellLocked t1 t2) = protoFact Linear "L_CellLocked" [t1, t2]`
-        // (Facts.hs:253-270, see line 270).
+        // (Facts.hs).
         TransFact::CellLocked(t1, t2) => proto_fact(
             Multiplicity::Linear,
             "L_CellLocked",
             vec![t1.clone(), t2.clone()],
         ),
         // `factToFact (FLet p t vars) = protoFact Linear ("Let_" ++ pos) (t : vars)`
-        // (Facts.hs:257-259).  `vars` rendered as `S.toList` (sorted unique).
+        // (Facts.hs).  `vars` rendered as `S.toList` (sorted unique).
         TransFact::FLet(p, t, vars) => {
             let full = format!("Let_{}", pretty_position(p));
             let mut ts: Vec<LNTerm> = vec![t.clone()];
-            ts.extend(
-                sorted_unique(vars.clone())
-                    .into_iter()
-                    .map(|v| VTerm::Lit(Lit::Var(v))),
-            );
+            ts.extend(sorted_unique(vars.clone()).into_iter().map(var_term));
             proto_fact(Multiplicity::Linear, &full, ts)
         }
         // `factToFact (Message t t') = protoFact Linear "Message" [t, t']`
-        // (Facts.hs:253-270, see line 260) — the private-channel message-in-transit fact.
+        // (Facts.hs) — the private-channel message-in-transit fact.
         TransFact::Message(t1, t2) => proto_fact(
             Multiplicity::Linear,
             "Message",
             vec![t1.clone(), t2.clone()],
         ),
-        // `factToFact (Ack t t') = protoFact Linear "Ack" [t, t']` (Facts.hs:253-270, see line 261)
+        // `factToFact (Ack t t') = protoFact Linear "Ack" [t, t']` (Facts.hs)
         // — the private-channel acknowledgement fact.
         TransFact::Ack(t1, t2) => {
             proto_fact(Multiplicity::Linear, "Ack", vec![t1.clone(), t2.clone()])
         }
         // `factToFact (MessageIDSender p) = protoFact Linear "MID_Sender" [varTerm $ varMID p]`
-        // (Facts.hs:253-270, see line 262).
+        // (Facts.hs).
         TransFact::MessageIDSender(p) => proto_fact(
             Multiplicity::Linear,
             "MID_Sender",
-            vec![VTerm::Lit(Lit::Var(var_mid(p)))],
+            vec![var_term(var_mid(p))],
         ),
         // `factToFact (MessageIDReceiver p) = protoFact Linear "MID_Receiver" [varTerm $ varMID p]`
-        // (Facts.hs:253-270, see line 263).
+        // (Facts.hs).
         TransFact::MessageIDReceiver(p) => proto_fact(
             Multiplicity::Linear,
             "MID_Receiver",
-            vec![VTerm::Lit(Lit::Var(var_mid(p)))],
+            vec![var_term(var_mid(p))],
         ),
     }
 }
 
-/// `actionToFact` (Facts.hs:213-234).
-pub fn action_to_fact(a: &TransAction) -> LNFact {
+/// `actionToFact` (Facts.hs).
+pub(crate) fn action_to_fact(a: &TransAction) -> LNFact {
     match a {
         TransAction::InitEmpty => proto_fact(Multiplicity::Linear, "Init", vec![]),
         TransAction::EventEmpty => proto_fact(Multiplicity::Linear, "Event", vec![]),
         TransAction::TamarinAct(f) => f.clone(),
         // `actionToFact (PredicateA f) = mapFactName ("Pred_" ++) f`
-        // (Facts.hs:213-234, see line 226).
+        // (Facts.hs).
         TransAction::PredicateA(f) => map_fact_name(f, "Pred_"),
         // `actionToFact (NegPredicateA f) = mapFactName ("Pred_Not_" ++) f`
-        // (Facts.hs:213-234, see line 227).
+        // (Facts.hs).
         TransAction::NegPredicateA(f) => map_fact_name(f, "Pred_Not_"),
         // `actionToFact (IsIn t v) = protoFact Linear "IsIn" [t, varTerm v]`
-        // (Facts.hs:213-234, see line 220).
-        TransAction::IsIn(t, v) => proto_fact(
-            Multiplicity::Linear,
-            "IsIn",
-            vec![t.clone(), VTerm::Lit(Lit::Var(*v))],
-        ),
-        // `actionToFact (IsNotSet t) = protoFact Linear "IsNotSet" [t]` (Facts.hs:213-234, see line 221).
+        // (Facts.hs).
+        TransAction::IsIn(t, v) => {
+            proto_fact(Multiplicity::Linear, "IsIn", vec![t.clone(), var_term(*v)])
+        }
+        // `actionToFact (IsNotSet t) = protoFact Linear "IsNotSet" [t]` (Facts.hs).
         TransAction::IsNotSet(t) => proto_fact(Multiplicity::Linear, "IsNotSet", vec![t.clone()]),
         // `actionToFact (InsertA t1 t2) = protoFact Linear "Insert" [t1, t2]`
-        // (Facts.hs:213-234, see line 222).
+        // (Facts.hs).
         TransAction::InsertA(t1, t2) => {
             proto_fact(Multiplicity::Linear, "Insert", vec![t1.clone(), t2.clone()])
         }
-        // `actionToFact (DeleteA t) = protoFact Linear "Delete" [t]` (Facts.hs:213-234, see line 223).
+        // `actionToFact (DeleteA t) = protoFact Linear "Delete" [t]` (Facts.hs).
         TransAction::DeleteA(t) => proto_fact(Multiplicity::Linear, "Delete", vec![t.clone()]),
         // `actionToFact (LockNamed t v) =
         //    protoFact Linear (lockFactName v) [lockPubTerm v, varTerm v, t]`
-        // (Facts.hs:213-234, see line 228).
+        // (Facts.hs).
         TransAction::LockNamed(t, v) => proto_fact(
             Multiplicity::Linear,
             &lock_fact_name(v),
-            vec![lock_pub_term(v), VTerm::Lit(Lit::Var(*v)), t.clone()],
+            vec![lock_pub_term(v), var_term(*v), t.clone()],
         ),
         // `actionToFact (LockUnnamed t v) =
-        //    protoFact Linear "Lock" [lockPubTerm v, varTerm v, t]` (Facts.hs:213-234, see line 229).
+        //    protoFact Linear "Lock" [lockPubTerm v, varTerm v, t]` (Facts.hs).
         TransAction::LockUnnamed(t, v) => proto_fact(
             Multiplicity::Linear,
             "Lock",
-            vec![lock_pub_term(v), VTerm::Lit(Lit::Var(*v)), t.clone()],
+            vec![lock_pub_term(v), var_term(*v), t.clone()],
         ),
         // `actionToFact (UnlockNamed t v) =
         //    protoFact Linear (unlockFactName v) [lockPubTerm v, varTerm v, t]`
-        // (Facts.hs:213-234, see line 230).
+        // (Facts.hs).
         TransAction::UnlockNamed(t, v) => proto_fact(
             Multiplicity::Linear,
             &unlock_fact_name(v),
-            vec![lock_pub_term(v), VTerm::Lit(Lit::Var(*v)), t.clone()],
+            vec![lock_pub_term(v), var_term(*v), t.clone()],
         ),
         // `actionToFact (UnlockUnnamed t v) =
-        //    protoFact Linear "Unlock" [lockPubTerm v, varTerm v, t]` (Facts.hs:213-234, see line 231).
+        //    protoFact Linear "Unlock" [lockPubTerm v, varTerm v, t]` (Facts.hs).
         TransAction::UnlockUnnamed(t, v) => proto_fact(
             Multiplicity::Linear,
             "Unlock",
-            vec![lock_pub_term(v), VTerm::Lit(Lit::Var(*v)), t.clone()],
+            vec![lock_pub_term(v), var_term(*v), t.clone()],
         ),
         // `actionToFact (ChannelIn t) = protoFact Linear "ChannelIn" [t]`
-        // (Facts.hs:213-234, see line 224).
+        // (Facts.hs).
         TransAction::ChannelIn(t) => proto_fact(Multiplicity::Linear, "ChannelIn", vec![t.clone()]),
         // `actionToFact (ProgressFrom p) =
         //    protoFact Linear ("ProgressFrom_" ++ prettyPosition p) [varTerm $ varProgress p]`
-        // (Facts.hs:213-234, see line 232).
+        // (Facts.hs).
         TransAction::ProgressFrom(p) => proto_fact(
             Multiplicity::Linear,
             &format!("ProgressFrom_{}", pretty_position(p)),
-            vec![VTerm::Lit(Lit::Var(var_progress(p)))],
+            vec![var_term(var_progress(p))],
         ),
         // `actionToFact (ProgressTo p pf) =
         //    protoFact Linear ("ProgressTo_" ++ prettyPosition p) [varTerm $ varProgress pf]`
-        // (Facts.hs:213-234, see line 233).  NOTE: name uses `p`, but the term is `varProgress pf`.
+        // (Facts.hs).  NOTE: name uses `p`, but the term is `varProgress pf`.
         TransAction::ProgressTo(p, pf) => proto_fact(
             Multiplicity::Linear,
             &format!("ProgressTo_{}", pretty_position(p)),
-            vec![VTerm::Lit(Lit::Var(var_progress(pf)))],
+            vec![var_term(var_progress(pf))],
         ),
         // `actionToFact (Send p t) = protoFact Linear "Send" [varTerm $ varMsgId p, t]`
-        // (Facts.hs:213-234, see line 218).
+        // (Facts.hs).
         TransAction::Send(p, t) => proto_fact(
             Multiplicity::Linear,
             "Send",
-            vec![VTerm::Lit(Lit::Var(var_mid(p))), t.clone()],
+            vec![var_term(var_mid(p)), t.clone()],
         ),
         // `actionToFact (Receive p t) = protoFact Linear "Receive" [varTerm $ varMsgId p, t]`
-        // (Facts.hs:213-234, see line 219).
+        // (Facts.hs).
         TransAction::Receive(p, t) => proto_fact(
             Multiplicity::Linear,
             "Receive",
-            vec![VTerm::Lit(Lit::Var(var_mid(p))), t.clone()],
+            vec![var_term(var_mid(p)), t.clone()],
         ),
     }
 }
 
-/// `varNameProgress p = "prog_" ++ prettyPosition p` (Facts.hs:189-190).
-pub fn var_name_progress(p: &ProcessPosition) -> String {
+/// `varNameProgress p = "prog_" ++ prettyPosition p` (Facts.hs).
+pub(crate) fn var_name_progress(p: &ProcessPosition) -> String {
     format!("prog_{}", pretty_position(p))
 }
 
-/// `varProgress p = LVar (varNameProgress p) LSortFresh 0` (Facts.hs:192-197):
+/// `varProgress p = LVar (varNameProgress p) LSortFresh 0` (Facts.hs):
 /// the fresh progress variable used in the rule premise/conclusion/action.
-pub fn var_progress(p: &ProcessPosition) -> LVar {
+pub(crate) fn var_progress(p: &ProcessPosition) -> LVar {
     LVar::new(var_name_progress(p), tamarin_term::lterm::LSort::Fresh, 0)
 }
 
-/// `msgVarProgress p = LVar (varNameProgress p) LSortMsg 0` (Facts.hs:199-204):
+/// `msgVarProgress p = LVar (varNameProgress p) LSortMsg 0` (Facts.hs):
 /// the message-sort progress variable used in the progress RESTRICTION
 /// quantifier (`∀ prog_<pos>. ..`).
-pub fn msg_var_progress(p: &ProcessPosition) -> LVar {
+pub(crate) fn msg_var_progress(p: &ProcessPosition) -> LVar {
     LVar::new(var_name_progress(p), tamarin_term::lterm::LSort::Msg, 0)
 }
 
-/// `varMID p = LVar ("mid_" ++ prettyPosition p) LSortFresh 0` (Facts.hs:244-251).
-/// (HS also has the identical `varMsgId`, Facts.hs:206-211.)
-pub fn var_mid(p: &ProcessPosition) -> LVar {
+/// `varMID p = LVar ("mid_" ++ prettyPosition p) LSortFresh 0` (Facts.hs).
+/// (HS also has the identical `varMsgId`, Facts.hs.)
+pub(crate) fn var_mid(p: &ProcessPosition) -> LVar {
     LVar::new(
         format!("mid_{}", pretty_position(p)),
         tamarin_term::lterm::LSort::Fresh,
@@ -360,23 +356,45 @@ pub fn var_mid(p: &ProcessPosition) -> LVar {
     )
 }
 
-/// `isState` (Facts.hs:158-160).
-// Intentionally retained: faithful HS port; no caller yet (the predicate is
-// inlined as `matches!(.., TransFact::State(..))` at the merge-with-state site).
-#[allow(dead_code)]
-pub(crate) fn is_state(f: &TransFact) -> bool {
-    matches!(f, TransFact::State(..))
-}
-
-/// `isNonSemiState` (Facts.hs:154-156): a non-semi `State` fact.
-pub fn is_non_semi_state(f: &TransFact) -> bool {
+/// `isNonSemiState` (Facts.hs): a non-semi `State` fact.
+pub(crate) fn is_non_semi_state(f: &TransFact) -> bool {
     matches!(f, TransFact::State(kind, _, _) if !kind.is_semi_state())
 }
 
+/// `isOutFact` (Facts.hs).
+pub(crate) fn is_out_fact(f: &LNFact) -> bool {
+    matches!(f.tag, tamarin_theory::fact::FactTag::Out)
+}
+
+/// `isLetFact` (Facts.hs): name starts with `Let`.
+pub(crate) fn is_let_fact(f: &LNFact) -> bool {
+    proto_name_starts_with(f, &["Let"])
+}
+
+/// `isStateFact` (Facts.hs): name starts with `State` or `Semistate`.
+pub(crate) fn is_state_fact(f: &LNFact) -> bool {
+    proto_name_starts_with(f, &["State", "Semistate"])
+}
+
+/// `isLockFact` (Facts.hs): name starts with `L_CellLocked`.
+pub(crate) fn is_lock_fact(f: &LNFact) -> bool {
+    proto_name_starts_with(f, &["L_CellLocked"])
+}
+
+/// True when `f` is a proto fact whose name starts with one of `prefixes`.
+fn proto_name_starts_with(f: &LNFact, prefixes: &[&str]) -> bool {
+    match &f.tag {
+        tamarin_theory::fact::FactTag::Proto(_, name, _) => {
+            prefixes.iter().any(|p| name.starts_with(p))
+        }
+        _ => false,
+    }
+}
+
 /// `addVarToState v' (State kind pos vs) = State kind pos (v' `S.insert` vs)`
-/// (Facts.hs:162-164): insert a variable into a `State` fact's variable set;
+/// (Facts.hs): insert a variable into a `State` fact's variable set;
 /// other facts unchanged.
-pub fn add_var_to_state(v: &LVar, f: &TransFact) -> TransFact {
+pub(crate) fn add_var_to_state(v: &LVar, f: &TransFact) -> TransFact {
     match f {
         TransFact::State(kind, pos, vs) => {
             let mut nvs = vs.clone();
@@ -389,23 +407,23 @@ pub fn add_var_to_state(v: &LVar, f: &TransFact) -> TransFact {
     }
 }
 
-/// `lockFactName v = "Lock_" ++ show (lvarIdx v)` (Facts.hs:180-181).
-pub fn lock_fact_name(v: &LVar) -> String {
+/// `lockFactName v = "Lock_" ++ show (lvarIdx v)` (Facts.hs).
+pub(crate) fn lock_fact_name(v: &LVar) -> String {
     format!("Lock_{}", v.idx)
 }
 
-/// `unlockFactName v = "Unlock_" ++ show (lvarIdx v)` (Facts.hs:183-184).
-pub fn unlock_fact_name(v: &LVar) -> String {
+/// `unlockFactName v = "Unlock_" ++ show (lvarIdx v)` (Facts.hs).
+pub(crate) fn unlock_fact_name(v: &LVar) -> String {
     format!("Unlock_{}", v.idx)
 }
 
-/// `lockPubTerm v = pubTerm (show (lvarIdx v))` (Facts.hs:186-187): the public
+/// `lockPubTerm v = pubTerm (show (lvarIdx v))` (Facts.hs): the public
 /// constant `'<idx v>'` used as the first argument of the lock/unlock facts.
 fn lock_pub_term(v: &LVar) -> LNTerm {
     tamarin_term::lterm::pub_term(v.idx.to_string())
 }
 
-/// `mapFactName (prefix ++)` (Facts.hs:173-177): prepend `prefix` to a
+/// `mapFactName (prefix ++)` (Facts.hs): prepend `prefix` to a
 /// `ProtoFact` name (other tags are left unchanged).
 fn map_fact_name(f: &LNFact, prefix: &str) -> LNFact {
     use tamarin_theory::fact::FactTag;
@@ -431,10 +449,10 @@ fn proto_fact_mult(mult: Multiplicity, name: &str, terms: Vec<LNTerm>) -> LNFact
 }
 
 // =============================================================================
-// crc32 / colorForProcessName (Facts.hs:343-374)
+// crc32 / colorForProcessName (Facts.hs)
 // =============================================================================
 
-/// `crc32` (Facts.hs:343-347).
+/// `crc32` (Facts.hs).
 fn crc32(s: &str) -> u32 {
     fn inner(c: u32) -> u32 {
         (c >> 1) ^ (0xedb8_8329u32 & 0u32.wrapping_sub(c & 1))
@@ -451,7 +469,7 @@ fn crc32(s: &str) -> u32 {
     acc
 }
 
-/// `colorHash` (Facts.hs:356-360): per-channel byte of the CRC, scaled to [0,1].
+/// `colorHash` (Facts.hs): per-channel byte of the CRC, scaled to [0,1].
 fn color_hash(s: &str) -> Rgb {
     let h = crc32(s);
     let nth = |n: u32| -> f64 { (((h >> (8 * n)) & 0xff) as f64) / 255.0 };
@@ -466,8 +484,8 @@ fn interpolate(a: Hsv, b: Hsv, t: f64) -> Hsv {
     )
 }
 
-/// `colorForProcessName` (Facts.hs:368-374).
-pub fn color_for_process_name(names: &[String]) -> Rgb {
+/// `colorForProcessName` (Facts.hs).
+pub(crate) fn color_for_process_name(names: &[String]) -> Rgb {
     if names.is_empty() {
         // HS `RGB 255 255 255` — `rgbToHex` clamps `floor(256*255)` to 255 →
         // `#ffffff`.  Mirror with the same out-of-[0,1] value.
@@ -485,28 +503,28 @@ pub fn color_for_process_name(names: &[String]) -> Rgb {
 }
 
 // =============================================================================
-// AnnotatedRule + toRule (Facts.hs:116-125, 376-404)
+// AnnotatedRule + toRule (Facts.hs)
 // =============================================================================
 
-/// `AnnotatedRule` (Facts.hs:116-125).  `process` is the subprocess this rule
+/// `AnnotatedRule` (Facts.hs).  `process` is the subprocess this rule
 /// was generated for (used for naming / color / `process=` attribute).
 #[derive(Debug, Clone)]
-pub struct AnnotatedRule<Ann> {
+pub(crate) struct AnnotatedRule<Ann> {
     pub process_name: Option<String>,
     pub process: Process<Ann, SapicLVar>,
     pub position: RulePosition,
     pub prems: Vec<TransFact>,
     pub acts: Vec<TransAction>,
     pub concs: Vec<TransFact>,
-    /// Embedded restrictions (HS `restr :: [SyntacticLNFormula]`, Facts.hs:116-125, see line 123).
-    /// Carried as parser-AST formulas so they flow through the existing
-    /// `_restrict` expansion (`rule_restriction::lift_rule_restrictions`).
-    /// Non-empty only for `if <formula>` arms (the `Cond` combinator).
-    pub restr: Vec<tamarin_parser::ast::Formula>,
+    /// Embedded restrictions (HS `restr :: [SyntacticLNFormula]`, Facts.hs).
+    /// `apply_sapic` hands them to the `_restrict` expansion
+    /// (`rule_restriction::rule_restrictions`), which turns each into a
+    /// `Restr_<rule>_<i>` restriction plus an action on this rule.
+    pub restr: Vec<SyntacticLNFormula>,
     pub index: usize,
 }
 
-/// `prettyEitherPositionOrSpecial` (Facts.hs:316-319).
+/// `prettyEitherPositionOrSpecial` (Facts.hs).
 fn pretty_position_or_special(pos: &RulePosition) -> String {
     match pos {
         RulePosition::Pos(p) => pretty_position(p),
@@ -515,13 +533,13 @@ fn pretty_position_or_special(pos: &RulePosition) -> String {
     }
 }
 
-/// `getTopLevelName` (Facts.hs:321-324) — the process-name list from the
+/// `getTopLevelName` (Facts.hs) — the process-name list from the
 /// (already-name-propagated) annotation of the subprocess.
 fn get_top_level_name<Ann: GoodAnnotation>(p: &Process<Ann, SapicLVar>) -> &[String] {
     &p.annotation().parsed().process_names
 }
 
-/// `roleFromProcessNameList` (Facts.hs:399-400).
+/// `roleFromProcessNameList` (Facts.hs).
 fn role_from_process_name_list(names: &[String]) -> String {
     if names.is_empty() {
         "Process".to_string()
@@ -530,42 +548,26 @@ fn role_from_process_name_list(names: &[String]) -> String {
     }
 }
 
-/// `stripNonAlphanumerical = filter isAlpha` (Facts.hs:376-404, see line 401).
+/// `stripNonAlphanumerical = filter isAlpha` (Facts.hs).
 fn strip_non_alphabetic(s: &str) -> String {
     s.chars().filter(|c| c.is_alphabetic()).collect()
 }
 
-/// Erase the rich annotation back to a `PlainProcess` for printing (HS
-/// `toProcess`).
-fn to_plain<Ann: GoodAnnotation + Clone>(p: &Process<Ann, SapicLVar>) -> PlainProcess {
-    match p {
-        Process::Null(a) => Process::Null(a.parsed().clone()),
-        Process::Action(ac, a, body) => {
-            Process::Action(ac.clone(), a.parsed().clone(), Box::new(to_plain(body)))
-        }
-        Process::Comb(c, a, l, r) => Process::Comb(
-            c.clone(),
-            a.parsed().clone(),
-            Box::new(to_plain(l)),
-            Box::new(to_plain(r)),
-        ),
-    }
-}
-
-/// The HS-faithful rule name (Facts.hs:381-388).
-pub fn rule_name<Ann: GoodAnnotation + Clone>(r: &AnnotatedRule<Ann>) -> String {
+/// The HS-faithful rule name (Facts.hs).
+pub(crate) fn rule_name<Ann: GoodAnnotation>(r: &AnnotatedRule<Ann>) -> String {
     match &r.process_name {
         Some(s) => s.clone(),
-        None => generated_rule_name(&to_plain(&r.process), r.index, &r.position),
+        None => generated_rule_name(&to_parsed(&r.process), r.index, &r.position),
     }
 }
 
-/// The `Nothing` arm of `toRule`'s `name` (Facts.hs:383-388):
+/// The `Nothing` arm of `toRule`'s `name` (Facts.hs):
 /// `unNull (stripNonAlphanumerical (prettySapicTopLevel process)) ++ "_" ++
 /// show index ++ "_" ++ prettyEitherPositionOrSpecial position`.
 ///
-/// Takes the already-erased process so [`to_rule`] can share one `to_plain`
-/// with the `process=` attribute it also builds from it.
+/// Takes the already-erased process so [`to_rule`] can share one
+/// [`crate::annotation::to_parsed`] with the `process=` attribute it also
+/// builds from it.
 fn generated_rule_name(plain: &PlainProcess, index: usize, position: &RulePosition) -> String {
     let stripped = strip_non_alphabetic(&pretty_sapic_top_level(plain));
     // `unNull s = if null s then "p" else s`
@@ -573,16 +575,16 @@ fn generated_rule_name(plain: &PlainProcess, index: usize, position: &RulePositi
     format!("{un_null}_{index}_{}", pretty_position_or_special(position))
 }
 
-/// `toRule` (Facts.hs:376-404): build the final `ProtoRuleE` with HS-exact
+/// `toRule` (Facts.hs): build the final `ProtoRuleE` with HS-exact
 /// `name`, `color`, `process`, `role`, `issapicrule` attributes.
 ///
-/// `ignoreDerivChecks = isLookup process` (Facts.hs:403-404): the lookup rules
+/// `ignoreDerivChecks = isLookup process` (Facts.hs): the lookup rules
 /// carry the `no_derivcheck` attribute so the message-derivation check skips
 /// them (the bound lookup variable is unconstrained at that point).
-pub fn to_rule(r: &AnnotatedRule<ProcessAnnotation<LVar>>) -> ProtoRuleE {
+pub(crate) fn to_rule(r: &AnnotatedRule<ProcessAnnotation<LVar>>) -> ProtoRuleE {
     // Both the generated name and the `process=` attribute read the erased
     // process, so erase once.
-    let plain = to_plain(&r.process);
+    let plain = to_parsed(&r.process);
     let name = match &r.process_name {
         Some(s) => s.clone(),
         None => generated_rule_name(&plain, r.index, &r.position),
@@ -592,7 +594,7 @@ pub fn to_rule(r: &AnnotatedRule<ProcessAnnotation<LVar>>) -> ProtoRuleE {
     // `getTopLevelName` IS that second expression, so one binding serves both.
     let names = get_top_level_name(&r.process);
     // HS `isLookup (ProcessComb (Lookup _ _) _ _ _) = True; isLookup _ = False`
-    // (Facts.hs:403-404) — the LITERAL process node this rule was generated for.
+    // (Facts.hs) — the LITERAL process node this rule was generated for.
     let is_lookup_proc = matches!(
         &r.process,
         Process::Comb(
@@ -604,7 +606,9 @@ pub fn to_rule(r: &AnnotatedRule<ProcessAnnotation<LVar>>) -> ProtoRuleE {
     );
     let attr = RuleAttributes {
         color: Some(color_for_process_name(names)),
-        process: Some(plain),
+        process: Some(std::sync::Arc::new(
+            tamarin_theory::sapic::SharedProcess::new(plain),
+        )),
         ignore_deriv_checks: is_lookup_proc,
         is_sapic_rule: true,
         role: Some(role_from_process_name_list(names)),
@@ -617,49 +621,10 @@ pub fn to_rule(r: &AnnotatedRule<ProcessAnnotation<LVar>>) -> ProtoRuleE {
     let prems: Vec<LNFact> = r.prems.iter().map(fact_to_fact).collect();
     let acts: Vec<LNFact> = r.acts.iter().map(action_to_fact).collect();
     let concs: Vec<LNFact> = r.concs.iter().map(fact_to_fact).collect();
-    let new_vars = compute_new_vars(&prems, &concs, &acts);
+    // HS `newVariables l r` (Facts.hs): the premises against the
+    // conclusions alone — the actions do not contribute new variables here.
+    let new_vars = tamarin_theory::fact::new_variables(&prems, &concs);
     Rule::new(info, prems, concs, acts).with_new_vars(new_vars)
-}
-
-/// `newVariables l r` (Rule.hs): variables in conclusions/actions not bound by
-/// the premises.  Mirrors `elaborate.rs::compute_new_vars`.
-pub fn compute_new_vars(prems: &[LNFact], concs: &[LNFact], acts: &[LNFact]) -> Vec<LNTerm> {
-    use std::collections::BTreeSet;
-    fn collect(t: &LNTerm, out: &mut BTreeSet<LVar>) {
-        match t {
-            VTerm::Lit(Lit::Var(v)) => {
-                out.insert(*v);
-            }
-            VTerm::Lit(_) => {}
-            VTerm::App(_, args) => {
-                for a in args.iter() {
-                    collect(a, out);
-                }
-            }
-        }
-    }
-    let mut prem_vars: BTreeSet<LVar> = BTreeSet::new();
-    for f in prems {
-        for t in f.terms.iter() {
-            collect(t, &mut prem_vars);
-        }
-    }
-    let mut new_set: BTreeSet<LVar> = BTreeSet::new();
-    for f in concs.iter().chain(acts) {
-        for t in f.terms.iter() {
-            let mut here = BTreeSet::new();
-            collect(t, &mut here);
-            for v in here {
-                if !prem_vars.contains(&v) {
-                    new_set.insert(v);
-                }
-            }
-        }
-    }
-    new_set
-        .into_iter()
-        .map(|v| VTerm::Lit(Lit::Var(v)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -731,6 +696,34 @@ mod tests {
             }
             _ => panic!("expected proto fact"),
         }
+    }
+
+    /// `toRule` computes `newVariables l r` (Facts.hs): premises against
+    /// conclusions alone.  A variable occurring only in an action is not a
+    /// new variable of the generated rule; a conclusion-only variable is.
+    #[test]
+    fn to_rule_new_vars_ignore_action_only_variables() {
+        use tamarin_term::lterm::LSort;
+
+        let x = LVar::new("x", LSort::Msg, 0);
+        let y = LVar::new("y", LSort::Msg, 0);
+        let z = LVar::new("z", LSort::Msg, 0);
+        let r = AnnotatedRule {
+            process_name: Some("t".to_string()),
+            process: Process::Null(ProcessAnnotation::default()),
+            position: RulePosition::Pos(vec![]),
+            prems: vec![TransFact::In(var_term(x))],
+            acts: vec![TransAction::TamarinAct(proto_fact(
+                Multiplicity::Linear,
+                "A",
+                vec![var_term(y)],
+            ))],
+            concs: vec![TransFact::Out(var_term(z))],
+            restr: Vec::new(),
+            index: 0,
+        };
+        let rule = to_rule(&r);
+        assert_eq!(rule.new_vars, vec![var_term(z)]);
     }
 
     #[test]

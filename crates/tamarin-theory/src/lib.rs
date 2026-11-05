@@ -1,28 +1,28 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Theory representation for the Tamarin prover (Rust port).
 //!
 //! Modules ported (mapping to Haskell):
-//! - [`signature`] ← `Theory.Model.Signature`
 //! - [`fact`] ← `Theory.Model.Fact`
 //! - [`atom`] ← `Theory.Model.Atom`
 //! - [`formula`] ← `Theory.Model.Formula` (data type + builders)
-//! - [`guarded`] / [`guarded_types`] ← `Theory.Model.Formula` (guarded
+//! - [`guarded`] ← `Theory.Model.Formula` (guarded
 //!   formulas)
 //! - [`restriction`] ← `Theory.Model.Restriction`;
-//!   [`rule_restriction`] ← `Theory.Model.Restriction` `liftedAddProtoRule`
-//!   (surface-formula → `LNFormula` rewrite-then-quantify)
-//! - [`macro_expand`] ← `Term.Macro` `applyMacros`
+//!   [`rule_restriction`] ← `Theory.Text.Parser` `liftedAddProtoRule`
+//!   (a rule's `_restrict` formulas → global restrictions + actions)
 //! - [`rule`] ← `Theory.Model.Rule` (data layer + indices + info types);
 //!   instantiation (`someRuleACInst*`) lives in
 //!   [`constraint::solver::reduction`]
-//! - [`sapic`] ← `Theory.Sapic.{Position, Term, Annotation, Process, Pattern}`
+//! - [`sapic`] ← `Theory.Sapic.{Position, Term, Annotation, Process, Pattern}`;
+//!   [`process_convert`] / [`process_inline`] build a `PlainProcess` from the
+//!   parser's surface process AST, which HS's parser builds directly
+//!   (`Theory/Text/Parser/Sapic.hs`)
 //! - [`intruder_rules`] / [`intruder_variants`] ←
 //!   `Theory.Tools.IntruderRules`; [`close_rule`] ← `CloseRule.hs`'s
 //!   no-deconstruction-chain check
-//! - [`predicate`] / [`predicate_expand`] ← `Theory.Syntactic.Predicate`
+//! - [`predicate`] ← `Theory.Syntactic.Predicate`
 //!   (data + lookup + `expandFormula`)
 //! - [`constraint`] ← `Theory.Constraint.*` (the constraint solver,
 //!   ~32k LOC: system, reduction, goals, sources, simplify,
@@ -30,12 +30,8 @@
 //! - [`tools`] ← `Theory.Tools.*` (equation store, subterm store,
 //!   abstract interpretation, loop breakers, rule-variants,
 //!   injective-fact instances)
-//! - [`check_terms`] / [`formula_reports`] / [`mult_restricted`] /
-//!   [`wf_fill`] ← `Theory.Tools.Wellformedness` (`checkTerms`,
-//!   `formulaReports`, `multRestrictedReport`, and the report's paragraph
-//!   layout); [`deriv_check`] ← message-derivation checks;
-//!   [`translated_wf`] ← the `checkTranslatedTheory` re-runs both drivers
-//!   share
+//! - [`wellformedness`] ← `Theory.Tools.Wellformedness`;
+//!   [`deriv_check`] ← message-derivation checks
 //! - [`theory`] ← top-level `Theory` (open/closed theories);
 //!   [`elaborate`] ← theory elaboration/closing
 //! - [`tactic`] ← heuristic tactics; [`proof_skeleton`] / [`replay`] /
@@ -45,51 +41,44 @@
 //!   [`pretty_sapic`] ← `Theory.Sapic.{Term,Process}` pretty-printing
 //! - [`auto_sources`] ← `OpenTheory` `addAutoSourcesLemma` (`--auto-sources`)
 //! - [`module`] ← `Theory.Module` (the `--output-module` selector)
-//! - [`state_trace`] ← solver state tracing
-//! - [`canon`] ← (no HS analog) lifts `tamarin_term::alpha_eq_ac`'s
-//!   canonization of terms for $\alphaeqac$ to facts and rules, per
-//!   `work.tex`'s "Canonization of Facts and Rule Instances"
-//! - [`canon_graph`] ← (no HS analog) extracts work.tex's graph part
-//!   `gp(Γ) = (V, E, c)` (vertices + structural edges; coloring is a
-//!   later stage) from a constraint `System`, per `work.tex`'s
-//!   "Canonization of Graphs of Rule Instances"
+//! - [`canon`] ← (no HS analog) the canonical form of a constraint `System`
+//!   modulo $\alphaeqac$, field by field, per `work.tex`'s "Canonization"
+//!   sections; [`canon_term_graph`] names its variables by canonicalizing
+//!   the whole system as one colored digraph of the system written as a
+//!   term ([`bliss_proc`] runs bliss on it)
 //!
 //! The `.spthy` parser lives in the sibling `tamarin-parser` crate.
 //!
 //! Not yet ported:
 //! - Remaining `Theory.Sapic.*` (Substitution, Print)
 
+pub mod apply;
 pub mod atom;
 pub mod auto_sources;
 pub mod bliss_proc;
 pub mod canon;
-pub mod canon_color;
 pub mod canon_fingerprint;
-pub mod canon_graph;
+pub mod canon_term_graph;
 pub mod check_proof;
-pub mod check_terms;
 pub mod close_rule;
 pub mod constraint;
 pub mod deriv_check;
 pub mod elaborate;
 pub mod fact;
 pub mod formula;
-pub mod formula_reports;
 pub mod guarded;
-pub mod guarded_types;
 pub mod intruder_rules;
 pub mod intruder_variants;
-pub mod macro_expand;
 pub mod module;
-pub mod mult_restricted;
 pub mod predicate;
-pub mod predicate_expand;
 pub mod pretty_formula;
 pub mod pretty_hpj;
 pub mod pretty_ml;
 pub mod pretty_sapic;
 pub mod pretty_system;
 pub mod pretty_theory;
+pub mod process_convert;
+pub mod process_inline;
 pub mod proof_skeleton;
 pub mod prove;
 pub mod replay;
@@ -97,15 +86,14 @@ pub mod restriction;
 pub mod rule;
 pub mod rule_restriction;
 pub mod sapic;
-pub mod signature;
-pub mod state_trace;
 #[cfg(feature = "serde")]
 pub mod system_codec;
 pub mod system_import;
 pub mod tactic;
 #[cfg(test)]
-pub(crate) mod test_maude;
+pub(crate) mod test_corpus;
+#[cfg(test)]
+mod test_corpus_common;
 pub mod theory;
 pub mod tools;
-pub mod translated_wf;
-pub mod wf_fill;
+pub mod wellformedness;

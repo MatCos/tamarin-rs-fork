@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Byte-pins the OPTIONS (privacy / constructability / NDC) each symbol of a
 //! DUAL-DECLARED name carries when the two declarations disagree — e.g.
@@ -8,13 +7,12 @@
 //!
 //! HS keeps the two symbols in two different fields of the `MaudeSig`: the
 //! `NoEqUser` one in `stFunSyms`, the `ACfctUser` one in `stACFunSyms`
-//! (Term/Maude/Signature.hs:97-98), each with its own options tuple —
+//! (Term/Maude/Signature.hs), each with its own options tuple —
 //! `function` builds the tuple from the attribute list of the declaration it
-//! is parsing and never merges the two (Theory/Text/Parser/Signature.hs:
-//! 183-225, see lines 220-225).
+//! is parsing and never merges the two (Theory/Text/Parser/Signature.hs).
 //!
 //! Which orders load is decided by `function`'s conflict check
-//! (Theory/Text/Parser/Signature.hs:212-216), which looks the name up in
+//! (Theory/Text/Parser/Signature.hs), which looks the name up in
 //! `stFunSyms` ONLY:
 //!
 //! | declaration order              | options      | result                     |
@@ -27,11 +25,11 @@
 //! So EVERY differing-options dual pair that loads is AC-declaration-first,
 //! and the two symbols must be resolved independently: the prefix and
 //! `op{a}b` spellings take the `NoEq` one (`lookupArity`'s NoEq-first list
-//! lookup, Theory/Text/Parser/Term.hs:62-72), the infix spelling takes the AC
-//! one (`acterm`, Theory/Text/Parser/Term.hs:166-172).
+//! lookup, Theory/Text/Parser/Term.hs), the infix spelling takes the AC
+//! one (`acterm`, Theory/Text/Parser/Term.hs).
 //!
 //! The observable is the Maude operator name: `funSymEncodeAttr`
-//! (Term/Maude/Parser.hs:76-88) folds privacy / constructability / AC-ness /
+//! (Term/Maude/Parser.hs) folds privacy / constructability / AC-ness /
 //! NDC into the four characters after the `tam` prefix, so a symbol resolved
 //! with the OTHER declaration's options serialises to an operator the theory
 //! module never declares — Maude then returns nothing for `get variants` and
@@ -46,12 +44,12 @@ use tamarin_term::function_symbols::{AcState, FunSym};
 use tamarin_term::lterm::LNTerm;
 use tamarin_term::maude_print::{fun_sym_encode_attr, pp_maude_ac_sym, pp_theory};
 use tamarin_term::term::Term;
-use tamarin_theory::elaborate::{elaborate, set_user_funs_for_theory, term_to_lnterm};
+use tamarin_theory::elaborate::{elaborate, term_to_lnterm};
 use tamarin_theory::pretty_theory::{web_proto_rules, web_signature_block};
 
 /// The Maude operator name the head of `t` serialises to — `tam`, the
 /// `funSymEncodeAttr` attribute block, then the symbol name (HS
-/// `ppMaudeACSym` / `ppMaudeNoEqSym`, Term/Maude/Parser.hs:136-147).
+/// `ppMaudeACSym` / `ppMaudeNoEqSym`, Term/Maude/Parser.hs).
 fn head_maude_op(t: &LNTerm) -> String {
     match t {
         Term::App(FunSym::NoEq(s), _) => format!(
@@ -65,11 +63,11 @@ fn head_maude_op(t: &LNTerm) -> String {
 }
 
 /// The Maude operator name of every action-fact argument of rule `rule`, in
-/// source order, resolved through the theory's own user-function bundle (the
-/// same install the load pipelines perform).
+/// source order, resolved against the theory's own signature (the one the
+/// load pipelines hand the converter).
 fn action_arg_ops(src: &str, rule: &str) -> Vec<String> {
     let thy = parse_theory(src, &[]).expect("parse");
-    let _guard = set_user_funs_for_theory(&thy);
+    let msig = elaborate(&thy).expect("elaborate").signature;
     let r = thy
         .items
         .iter()
@@ -81,7 +79,7 @@ fn action_arg_ops(src: &str, rule: &str) -> Vec<String> {
     r.actions
         .iter()
         .flat_map(|f| f.args.iter())
-        .map(|t| head_maude_op(&term_to_lnterm(t).expect("term converts")))
+        .map(|t| head_maude_op(&term_to_lnterm(t, &msig).expect("term converts")))
         .collect()
 }
 
@@ -91,8 +89,8 @@ fn signature_and_module(src: &str) -> (String, String) {
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = elaborate(&thy).expect("elaborate");
     (
-        web_signature_block(&elaborated.signature.maude_sig),
-        pp_theory(&elaborated.signature.maude_sig),
+        web_signature_block(&elaborated.signature),
+        pp_theory(&elaborated.signature),
     )
 }
 
@@ -111,9 +109,8 @@ fn assert_module_declares(module: &str, op: &str) {
 /// computation, not on term resolution).
 fn rule_echoes(src: &str) -> Vec<String> {
     let thy = parse_theory(src, &[]).expect("parse");
-    let _guard = set_user_funs_for_theory(&thy);
     let elaborated = elaborate(&thy).expect("elaborate");
-    web_proto_rules(&thy, &elaborated)
+    web_proto_rules(&elaborated)
         .into_iter()
         .map(|rule| match rule.split_once("\n\n  /*") {
             Some((echo, _annotation)) => echo.to_string(),
@@ -219,7 +216,7 @@ fn ndc_diff_is_kept_per_declaration() {
 /// A `[private]` `[AC]` declaration of `exp` under `builtins:
 /// diffie-hellman` leaves the theory-contributed NoEq `exp` untouched, so the
 /// prefix spelling is still THE DH `expSym` and `prettyTerm` renders it
-/// `'a'^'b'` (Term/Term.hs:310).  Reading privacy off the AC declaration
+/// `'a'^'b'` (Term/Term.hs).  Reading privacy off the AC declaration
 /// would make it a different symbol and drop the caret rendering.
 ///
 /// Oracle bytes: probe `p_expac`, signature echo
@@ -245,7 +242,7 @@ fn an_ac_only_private_exp_leaves_the_dh_exp_alone() {
         ["rule (modulo E) R1:\n   [ ] --[ A( 'a'^'b' ), B( ('a' exp 'b') ) ]-> [ ]"]
     );
     // `expSym` is `("exp",(2,Public,Constructor,NotNDC))`
-    // (Term/Term/FunctionSymbols.hs:251), i.e. `XCFU`; the AC `exp` is the
+    // (Term/Term/FunctionSymbols.hs), i.e. `XCFU`; the AC `exp` is the
     // private constructor `PCAU`.
     let ops = action_arg_ops(src, "R1");
     assert_eq!(ops, ["tamXCFUexp", "tamPCAUexp"]);
@@ -281,7 +278,7 @@ fn duplicate_ac_declarations_resolve_to_a_declared_operator() {
     assert_module_declares(&module, &ops[0]);
     // The bundle keeps the least symbol by `Ord ACfctSym`, which is the order
     // `lookupArity`'s `lookup` over the ascending `S.toList` sees first
-    // (Theory/Text/Parser/Term.hs:62-72); `Private < Public`
-    // (Term/Term/FunctionSymbols.hs:111-112), so the private one wins.
+    // (Theory/Text/Parser/Term.hs); `Private < Public`
+    // (Term/Term/FunctionSymbols.hs), so the private one wins.
     assert_eq!(ops, ["tamPCAUf"]);
 }

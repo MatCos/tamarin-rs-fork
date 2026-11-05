@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Replay a proof given as a tree of proof methods — HS `checkProof`
 //! (Theory/Proof.hs) with the prover for unhandled cases fixed to
@@ -24,6 +23,7 @@ use crate::constraint::solver::context::ProofContext;
 use crate::constraint::solver::proof_method::{check_and_exec_proof_method, ProofMethod};
 use crate::constraint::solver::search::{node_status_of, NodeStatus, ProofNode};
 use crate::constraint::system::System;
+use crate::prove::ProveError;
 
 /// A proof as a client sends it: the method applied at this node and the
 /// proof of each case, keyed by case name.
@@ -47,46 +47,46 @@ pub struct MethodTree {
 /// "Without a system" is `annotated == false` (HS `Nothing`), printed as
 /// `/* unannotated */` and counted as `Undetermined` by
 /// [`proof_status`](crate::constraint::solver::search::proof_status).
-pub fn check_proof(ctx: &ProofContext, sys: System, proof: &MethodTree) -> ProofNode {
+///
+/// A prover error while running a step (e.g. a failed Maude call) aborts the
+/// whole replay; it is not turned into an invalid step.
+pub fn check_proof(
+    ctx: &ProofContext,
+    sys: System,
+    proof: &MethodTree,
+) -> Result<ProofNode, ProveError> {
     if let ProofMethod::Sorry(reason) = &proof.method {
         let children = without_systems(&proof.cases, &sys);
-        return node(ProofMethod::Sorry(reason.clone()), sys, children, true);
+        let method = ProofMethod::Sorry(reason.clone());
+        return Ok(node(method, sys, children, true));
     }
-    match check_and_exec_proof_method(ctx, &proof.method, &sys) {
-        Some(produced) => {
-            let mut children = BTreeMap::new();
-            for (name, case_sys) in produced {
-                let child = match proof.cases.get(&name) {
-                    Some(sub) => check_proof(ctx, case_sys, sub),
-                    // Keeps its system, so it counts as an annotated sorry
-                    // (`Incomplete`); see the module docs.
-                    None => node(
-                        ProofMethod::Sorry(Some("Unhandled Case".into())),
-                        case_sys,
-                        BTreeMap::new(),
-                        true,
-                    ),
-                };
-                children.insert(name, child);
-            }
-            for (name, sub) in &proof.cases {
-                if !children.contains_key(name) {
-                    children.insert(name.clone(), without_system(sub, &sys));
-                }
-            }
-            node(proof.method.clone(), sys, children, true)
-        }
-        None => {
-            let mut children = BTreeMap::new();
-            children.insert(String::new(), without_system(proof, &sys));
-            node(
-                ProofMethod::Sorry(Some("invalid proof step encountered".into())),
-                sys,
-                children,
+    let Some(produced) = check_and_exec_proof_method(ctx, &proof.method, &sys)? else {
+        let mut children = BTreeMap::new();
+        children.insert(String::new(), without_system(proof, &sys));
+        let method = ProofMethod::Sorry(Some("invalid proof step encountered".into()));
+        return Ok(node(method, sys, children, true));
+    };
+    let mut children = BTreeMap::new();
+    for (name, case_sys) in produced {
+        let child = match proof.cases.get(&name) {
+            Some(sub) => check_proof(ctx, case_sys, sub)?,
+            // Keeps its system, so it counts as an annotated sorry
+            // (`Incomplete`); see the module docs.
+            None => node(
+                ProofMethod::Sorry(Some("Unhandled Case".into())),
+                case_sys,
+                BTreeMap::new(),
                 true,
-            )
+            ),
+        };
+        children.insert(name, child);
+    }
+    for (name, sub) in &proof.cases {
+        if !children.contains_key(name) {
+            children.insert(name.clone(), without_system(sub, &sys));
         }
     }
+    Ok(node(proof.method.clone(), sys, children, true))
 }
 
 /// HS `noSystemPrf`: the subtree as given, every node without a system.

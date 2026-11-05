@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Solver layer (port of `Theory.Constraint.Solver.*`).
 //!
@@ -39,6 +38,7 @@
 
 pub mod annotated_goals;
 pub mod bm25;
+pub mod canon_table;
 pub mod context;
 pub mod contradictions;
 pub mod goals;

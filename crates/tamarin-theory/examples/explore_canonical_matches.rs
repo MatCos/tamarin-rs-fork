@@ -70,7 +70,9 @@
 //!   methods offered, not the children they produce.
 //! - **In aggregate**: `--no-merge` switches merging off (every child is a
 //!   new node -- a plain tree search); its `graph`/`processed` must equal the
-//!   merged run's `tree`.
+//!   merged run's `tree`. `--no-canon` is the same tree search without
+//!   canonicalizing anything, so it costs what a search without merging
+//!   costs (and checks nothing).
 //!
 //! ## Three sizes
 //!
@@ -102,7 +104,7 @@
 //! (occurrences merged into an existing node), `fingerprint_secs`,
 //! `candidate_methods_secs` (ranking, for every created node),
 //! `exec_proof_method_secs`, `method_check_secs` (this tool's own merge
-//! check) and `profile_canon_secs` (`PROFILE_CANON`)), `peak_rss_mib`, `canonicalize` (`failures` and up to 20
+//! check)), `peak_rss_mib`, `canonicalize` (`failures` and up to 20
 //! `examples`, each with its `kind` -- `panic` or `error` --, `path` and
 //! `message`), `panic` (null, or where expanding a node panicked: `node`,
 //! `path`, `activity`, `message`), `invariant_violations` (see "Three
@@ -112,13 +114,13 @@
 //! `method_check` (`checked` merges, `mismatches`, `failures` to canonicalize
 //! a method, and up to 20 `examples`, each with the `representative`'s and
 //! the `duplicate`'s depth and path as `[{method, case}, …]` steps plus the
-//! methods only on either side), `methods` (interned method text, including
+//! methods only on either side), `canon` (see "What canonicalization did"), `methods` (interned method text, including
 //! candidate methods that were never applied) and `nodes`: per OR node its `depth`
 //! (min depth), `status` (`expanded`, `finished` + `result`, `depth_limit`,
 //! `unexpanded`, `canon_panic`, `exec_panic`), `canon_err` (canonicalization returned an
 //! error: expanded normally but never merged into), `fingerprint` (a hex
 //! digest of the canonical form the node was created under, null when
-//! canonicalization failed), `first_parent`
+//! canonicalization failed or with `--no-canon`), `first_parent`
 //! (`[parent, and_index, case_index]` of the occurrence that created it),
 //! `inapplicable`, `untried` (candidates skipped by `--top-methods`),
 //! `canon_secs`/`methods_secs`/`exec_secs` (canonicalizing the occurrence
@@ -126,7 +128,7 @@
 //! `and` (`method` index, `kind`, `cases` as
 //! `[name, child_id]` pairs).
 //!
-//! Usage: `cargo run --example explore_canonical_matches -- <theory.spthy> <lemma> [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--top-methods N] [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] [--heartbeat SECS] [--trace] [-D=FLAG ...] [--auto-sources]`
+//! Usage: `cargo run --example explore_canonical_matches -- <theory.spthy> <lemma> [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--no-canon] [--top-methods N] [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] [--heartbeat SECS] [--trace] [-D=FLAG ...] [--auto-sources]`
 //! or `... -- --list-lemmas <theory.spthy> [-D=FLAG ...] [--auto-sources]`.
 //!
 //! The theory is loaded as `tamarin-rs --prove` loads it
@@ -140,9 +142,12 @@
 //!   `--auto-sources`: as for `tamarin-rs`.
 //! - `--max-depth` (default 4): don't expand nodes at this depth.
 //! - `--max-nodes` (default 2000): stop expanding once this many
-//!   occurrences have been canonicalized. Checked before each expansion, so
-//!   it can be exceeded by one node's fan-out; queued nodes stay
-//!   `unexpanded`.
+//!   occurrences have been visited (canonicalized, unless `--no-canon`).
+//!   Checked before each expansion, so it can be exceeded by one node's
+//!   fan-out; queued nodes stay `unexpanded`.
+//! - `--no-canon`: don't canonicalize: every occurrence is a node of its
+//!   own, as with `--no-merge`, but without paying for canonical forms,
+//!   fingerprints or the merge check. No `bliss` needed.
 //! - `--top-methods N`: at each node, apply only the first N candidate
 //!   methods whose `exec_proof_method` succeeds, in `candidate_methods`'
 //!   (heuristic) order; inapplicable candidates don't count, the rest are
@@ -175,6 +180,21 @@
 //!   `trace_quantifier`, `attributes`, `modulo`; accountability's generated
 //!   lemmas included) and `error`.
 //!
+//! ## What canonicalization did
+//!
+//! Every occurrence is canonicalized through its term graph
+//! (`canon_term_graph`). The JSON's `canon` object summarizes it:
+//! `canonicalizations`, per-canonicalization `secs` (without the diagnostic
+//! generator check) and `wall_secs` (with it), the term graphs' `vertices`
+//! and `edges`, `aut` (`|Aut|` of each term graph, 1 where bliss was skipped)
+//! and `nontrivial_aut`, `generators`, `generators_moving_free_vars`,
+//! `generators_moving_vars` (free or local to an equation-store alternative),
+//! `non_genuine_generators` (generators that are not a symmetry of the
+//! system: the encoding lost information) with up to 20
+//! `non_genuine_examples`, `generator_moves` (what the generators permute),
+//! `bliss_skipped` (systems without free variables) and `phase_secs` (`term`,
+//! `graph`, `bliss`, `content`, `check`).
+//!
 //! ## Batch runs
 //!
 //! `experiments/run_explore.py` (in the thesis repository) runs this over
@@ -206,46 +226,16 @@
 //!   the merge check (candidate methods of merged occurrences, method
 //!   signatures). The first two are what merging costs, the next two
 //!   Tamarin's own search, the last this tool's verification.
-//! - `PROFILE_CANON=1` -- breaks the canonicalization bucket down into its
-//!   internal stages: Stage A graph extraction, Stage C's external `bliss`
-//!   subprocess (dimacs, spawn and parse), Stage F's automorphism GROUP
-//!   CLOSURE and group MINIMIZATION, Stage D's per-survivor re-seeding, and
-//!   Stage G (formulas/solved_formulas/lemmas/eq_store.subst/eq_store.conj/
-//!   subterm_store/goals, each timed and counted via
-//!   `canon::canonicalize_system_content_seeded_profiled`). **Stage G runs
-//!   ONCE PER SURVIVOR**, like `canonicalize_constraint_system` itself -- a
-//!   node with many tied survivors pays it that many times, usually the real
-//!   explanation for an outsized Stage G total. Also tracks graph size,
-//!   `|generators|`/`|Aut(G)|`/`|survivors|`, which `VertexKind`s the
-//!   automorphism generators move (and whether the swapped contents are
-//!   equal up to renaming), and how far candidate encodings would shrink the
-//!   group (`Refinements`): a refinement only splits color classes, so its
-//!   group is exactly the subset of the current closed group preserving it,
-//!   compared against the content automorphisms (the survivors, the floor
-//!   for any encoding). Re-runs the ENTIRE pipeline a second time to get the
-//!   sub-timings, so expect roughly double the wall time.
-//! - `DUMP_AUTOMORPHISMS=N` (requires `PROFILE_CANON=1`) -- prints up to N
-//!   occurrences per category (`genuine`, `fixed_by_skeleton`,
-//!   `fixed_by_local_content`, `fixed_by_literal_incidence`,
-//!   `fixed_by_positional_incidence`, `residual`: the cheapest candidate
-//!   that would leave exactly the content automorphisms) with their path, the
-//!   group sizes under each candidate, every generator's moved content
-//!   vertices, and the `<` constraints of moved dummy timepoints.
-//! - `DUMP_DUMMY_SWAPS=1` (requires `PROFILE_CANON=1`) -- prints the path to
-//!   the first 3 occurrences whose automorphism generators move ONLY
-//!   `Dummy`/`LessRelation` vertices, plus their `sys.nodes`/
-//!   `sys.less_atoms`, so one can be reproduced in the GUI. Raw NodeIds are
-//!   internal to this run; compare the printed `sys.nodes`/`less_atoms`
-//!   against what the GUI shows at the same point in the path.
-//! - `DUMP_DIMACS_AT=N` -- writes the graph part of the N-th canonicalized
-//!   occurrence (`processed` = N) as bliss input to `<--out>.occ<N>.dimacs`,
-//!   plus its vertex kinds to `<--out>.occ<N>.vertices`, before
-//!   canonicalizing it -- for a canonicalization that takes very long
-//!   (`bliss -directed <file>` reports `|Aut|`).
+//! - `DUMP_TERM_GRAPH_AT=N` -- writes the N-th canonicalized occurrence as
+//!   a term (`<--out>.occ<N>.term.txt`), its term graph as bliss input
+//!   (`.tg.dimacs`) and every vertex's color and key (`.tg.keys`).
+//! - `TERM_GRAPH_CHECK=0` -- skip the term graph's check that every
+//!   automorphism generator is a symmetry of the system (on by default; its
+//!   time is reported apart, as `phase_secs.check`).
 //! - `DUMP_CANON_PANIC=1` -- for the first occurrence whose canonicalization
-//!   panics, prints its rule instances and non-graph part (formulas,
+//!   panics, prints its rule instances and the rest of the system (formulas,
 //!   equation store, goals, ...) to stderr, to find which content the
-//!   graph part missed.
+//!   canonicalization missed.
 //! - `DUMP_MERGES_INTO=ID[,ID...]` -- for each listed OR node id, writes
 //!   the occurrence that created it and every occurrence merged into it
 //!   (path, system, canonical labelling and canonical form) to
@@ -253,8 +243,8 @@
 //!   `processed`), to diff two systems a merge claims are equal. Node ids
 //!   are this run's: rerun with the same arguments to hit the same ones.
 //!
-//! Requires `bliss` on `PATH` (or `$BLISS_PATH`) -- skips (via
-//! `bliss_available()`'s panic-unless-opted-out gate) if
+//! Requires `bliss` on `PATH` (or `$BLISS_PATH`), except with `--no-canon`
+//! -- skips (via `bliss_available()`'s panic-unless-opted-out gate) if
 //! `TAM_ALLOW_NO_BLISS=1` is set.
 
 // Example/dev tool: prints results to stdout by design; allow the
@@ -271,36 +261,27 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tamarin_theory::bliss_proc::{
-    bliss_available, canonical_edges, canonical_vertex_order, generate_group, graph_part_to_dimacs,
-    run_bliss, Permutation,
-};
-use tamarin_term::alpha_eq_ac::{canonicalize_alpha_eq_ac, CanonLabelling};
-use tamarin_term::fingerprint::{fingerprint_term, Fingerprint};
-use tamarin_term::lterm::{HasFrees, LNTerm, LSort, LVar};
-use tamarin_term::term::Term;
-use tamarin_term::vterm::Lit;
-use tamarin_theory::canon::{
-    canonicalize_constraint_system_with_labelling, canonicalize_graph_part_seeded,
-    canonicalize_graph_part, canonicalize_proof_method, canonicalize_system_content_seeded_profiled,
-    fact_to_term,
-    minimal_graph_part_labelings, rule_to_term, CanonicalSystem, ContentStageTimes,
-};
-use tamarin_theory::canon_color::{Color, ColorTable};
-use tamarin_theory::pretty_system::pretty_fact;
-use tamarin_theory::rule::rule_name_string;
+use tamarin_term::alpha_eq_ac::CanonLabelling;
+use tamarin_term::fingerprint::Fingerprint;
+use tamarin_theory::bliss_proc::{bliss_available, to_dimacs};
+use tamarin_theory::canon::{canonicalize_proof_method, CanonicalSystem};
 use tamarin_theory::canon_fingerprint::{
     fingerprint_constraint_system, fingerprint_proof_method, CanonicalSystemFingerprint,
 };
-use tamarin_theory::canon_graph::{extract_graph_part, GraphPart, VertexKind};
-use tamarin_theory::constraint::solver::context::{CutStrategy, ProofContext};
+use tamarin_theory::canon_term_graph::{
+    canonicalize_constraint_system_via_term_graph_with_labelling, system_to_term, term_to_graph,
+    TermGraphOptions, TermGraphStats, SYSTEM_SECTIONS,
+};
+use tamarin_theory::constraint::solver::context::ProofContext;
 use tamarin_theory::constraint::solver::proof_method::{
     exec_proof_method, ProofMethod, Result as FinishedResult,
 };
 use tamarin_theory::constraint::solver::search::candidate_methods;
 use tamarin_theory::constraint::system::System;
+use tamarin_theory::pretty_system::pretty_fact;
 use tamarin_theory::pretty_theory::pretty_proof_method_inline;
-use tamarin_theory::prove::{build_lemma_proof_context, CliHeuristic};
+use tamarin_theory::prove::ProverSession;
+use tamarin_theory::rule::rule_name_string;
 use tamarin_utils::{env_gate, FastMap};
 
 mod common;
@@ -318,7 +299,10 @@ static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
 /// Seconds since the process started (the first call).
 fn elapsed_secs() -> f64 {
-    PROCESS_START.get_or_init(Instant::now).elapsed().as_secs_f64()
+    PROCESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs_f64()
 }
 
 /// `eprintln!` with the elapsed time as a prefix.
@@ -417,7 +401,11 @@ fn breadcrumb_text() -> String {
     format!(
         "phase={} node={node} activity={} path={}",
         b.phase,
-        if b.activity.is_empty() { "-" } else { &b.activity },
+        if b.activity.is_empty() {
+            "-"
+        } else {
+            &b.activity
+        },
         if b.path.is_empty() { "-" } else { &b.path }
     )
 }
@@ -474,7 +462,11 @@ fn memory_mib(field: &str) -> Option<u64> {
 /// runs) -- the part that matters when one step takes minutes.
 fn activity_for_log(activity: &str) -> String {
     match activity.rfind(" :: ") {
-        Some(at) => format!("{} ...{}", truncate_for_log(&activity[..at], 300), &activity[at..]),
+        Some(at) => format!(
+            "{} ...{}",
+            truncate_for_log(&activity[..at], 300),
+            &activity[at..]
+        ),
         None => truncate_for_log(activity, 300).to_string(),
     }
 }
@@ -731,7 +723,12 @@ impl Graph {
     fn children(&self) -> Vec<Vec<OrId>> {
         self.nodes
             .iter()
-            .map(|n| n.and.iter().flat_map(|a| a.cases.iter().map(|&(_, c)| c)).collect())
+            .map(|n| {
+                n.and
+                    .iter()
+                    .flat_map(|a| a.cases.iter().map(|&(_, c)| c))
+                    .collect()
+            })
             .collect()
     }
 }
@@ -744,7 +741,6 @@ fn method_kind(m: &ProofMethod) -> &'static str {
         ProofMethod::Induction => "induction",
         ProofMethod::Finished(_) => "finished",
         ProofMethod::Invalidated => "invalidated",
-        ProofMethod::RawSolve(_) => "raw_solve",
     }
 }
 
@@ -803,7 +799,10 @@ mod sizes {
             }
             layer = next;
         }
-        TreeSizes { by_depth, distinct_at_depth }
+        TreeSizes {
+            by_depth,
+            distinct_at_depth,
+        }
     }
 
     #[cfg(test)]
@@ -854,7 +853,7 @@ mod sizes {
 }
 
 // =============================================================================
-// Profiling (`PROFILE`, `PROFILE_CANON`) -- terminal only
+// Profiling (`PROFILE`) -- terminal only
 // =============================================================================
 
 /// Runs `f`, adding its wall time to `acc` when `on`.
@@ -882,870 +881,6 @@ fn pct(part: Duration, total: Duration) -> f64 {
     }
 }
 
-/// `PROFILE_CANON=1`'s per-node breakdown of `canonicalize_constraint_system`'s
-/// OWN internal stages -- see [`profile_canonicalize_stages`]. `content`
-/// sums [`ContentStageTimes`]' durations over every survivor (Stage G runs
-/// once PER SURVIVOR in production, not once per node -- the real reason a
-/// large `survivors` count multiplies Stage G's total cost).
-#[derive(Default)]
-struct CanonStageTimes {
-    extract: Duration,
-    bliss: Duration,
-    group_closure: Duration,
-    group_minimization: Duration,
-    /// `canonical_vertex_order`+`canonical_edges`+`canonicalize_graph_part_seeded`,
-    /// summed across every survivor -- the same AC-canonicalization
-    /// machinery as `group_minimization`, but seeded and re-run per
-    /// SURVIVOR rather than per raw GROUP element.
-    stage_d_per_survivor: Duration,
-    content: ContentStageTimes,
-    vertices: usize,
-    edges: usize,
-    generators: usize,
-    group_size: usize,
-    survivors: usize,
-    /// What KIND of vertex the node's generators actually move -- see
-    /// [`classify_generator_moves`].
-    swaps: SwapKindCounts,
-    /// `Some("<nid_a> <-> <nid_b>")` when this node's generators move
-    /// ONLY `Dummy`/`LessRelation` vertices (no `RuleInstance`/`Action`/
-    /// other structural kind at all) -- naming one concrete swapped pair
-    /// of `Dummy` `NodeId`s, so `DUMP_DUMMY_SWAPS=1` can report exactly
-    /// which timepoints these are for a node worth inspecting further.
-    dummy_less_only_example: Option<String>,
-    group_sizes: GroupSizes,
-    /// Local content + positional literal incidence keeps exactly the
-    /// content automorphisms (same set, not just the same size).
-    positional_exact: bool,
-    /// Time spent on the refinement analysis -- not canonicalization, so
-    /// excluded from the stage sum and subtracted from the wall cross-check.
-    analysis: Duration,
-    /// [`automorphism_report`], when requested and the group is nontrivial.
-    report: Option<String>,
-}
-
-/// Per-`VertexKind`-label counts of vertex SLOTS moved by a node's
-/// automorphism generators (a transposition contributes 2, a 3-cycle 3,
-/// etc. -- see [`classify_generator_moves`]), split by whether the moved
-/// vertex's content is equal to its image's UP TO RENAMING + AC (same local
-/// canonical form, [`Refinements::local`]). A move between locally different
-/// contents is one a content-aware coloring would forbid; content-free
-/// structural vertices (`Dummy`, `LessRelation`, ...) always count as same.
-#[derive(Debug, Default, Clone)]
-struct SwapKindCounts {
-    same_local: BTreeMap<&'static str, u64>,
-    different_local: BTreeMap<&'static str, u64>,
-}
-
-impl SwapKindCounts {
-    fn merge(&mut self, other: &SwapKindCounts) {
-        for (k, v) in &other.same_local {
-            *self.same_local.entry(k).or_insert(0) += v;
-        }
-        for (k, v) in &other.different_local {
-            *self.different_local.entry(k).or_insert(0) += v;
-        }
-    }
-
-    /// Every label with at least one moved slot.
-    fn labels(&self) -> BTreeSet<&'static str> {
-        self.same_local
-            .keys()
-            .chain(self.different_local.keys())
-            .copied()
-            .collect()
-    }
-}
-
-/// Candidate refinements of the vertex coloring, per vertex of one graph
-/// part. A refinement keeps the graph and only splits color classes, so the
-/// automorphism group bliss would report under it is exactly the subset of
-/// the current (closed) group that preserves it -- evaluated here without
-/// touching `canon_color.rs`. Every key is invariant under the renaming + AC
-/// equivalence canonicalization works modulo; a key that weren't would make
-/// equivalent systems canonicalize differently.
-struct Refinements {
-    /// Current color + the content's skeleton: its local canonical form with
-    /// every variable replaced by one placeholder per sort (names are kept:
-    /// they are never renamed).
-    skeleton: Vec<(Color, Option<Fingerprint>)>,
-    /// Current color + the content's local canonical form (canonicalized on
-    /// its own, modulo renaming + AC) -- the finest per-vertex invariant.
-    local: Vec<(Color, Option<Fingerprint>)>,
-    /// Per distinct raw variable in vertex content: its sort and the sorted
-    /// indices of the vertices containing it -- what variable vertices with
-    /// incidence edges would add to the graph. Sorted. Names are left out:
-    /// a name is content, already part of the skeleton.
-    occurrences: Vec<(LSort, Vec<usize>)>,
-    /// Like `occurrences`, but each occurrence also carries its argument path
-    /// inside the vertex's term (unordered below AC/commutative symbols) --
-    /// literal vertices whose incidence edges are labelled by position.
-    positions: Vec<(LSort, Vec<(usize, String)>)>,
-}
-
-/// Records every variable occurrence in `t` (content of `vertex`) with its
-/// argument path: `symbol/index;` per step, `symbol/*;` below an AC or
-/// commutative symbol, whose argument order is not invariant.
-fn collect_positions(
-    t: &LNTerm,
-    vertex: usize,
-    path: &mut String,
-    out: &mut BTreeMap<LVar, Vec<(usize, String)>>,
-) {
-    use std::fmt::Write as _;
-    match t {
-        Term::Lit(Lit::Var(v)) => out.entry(*v).or_default().push((vertex, path.clone())),
-        Term::Lit(Lit::Con(_)) => {}
-        Term::App(sym, args) => {
-            let unordered = sym.is_ac() || sym.is_c();
-            for (i, a) in args.iter().enumerate() {
-                let len = path.len();
-                if unordered {
-                    write!(path, "{sym:?}/*;").ok();
-                } else {
-                    write!(path, "{sym:?}/{i};").ok();
-                }
-                collect_positions(a, vertex, path, out);
-                path.truncate(len);
-            }
-        }
-    }
-}
-
-/// The term a content vertex contributes to the graph-part term (see
-/// `canon::graph_part_to_term`); `None` for content-free vertices.
-fn content_term(v: &VertexKind) -> Option<LNTerm> {
-    match v {
-        VertexKind::RuleInstance(_, ru) => Some(rule_to_term(ru)),
-        VertexKind::Action(_, fact) => Some(fact_to_term(fact)),
-        _ => None,
-    }
-}
-
-impl Refinements {
-    fn new(part: &GraphPart) -> Self {
-        let n = part.vertices.len();
-        let mut skeleton = Vec::with_capacity(n);
-        let mut local = Vec::with_capacity(n);
-        let mut occurrences: BTreeMap<LVar, Vec<usize>> = BTreeMap::new();
-        let mut positions: BTreeMap<LVar, Vec<(usize, String)>> = BTreeMap::new();
-        for (i, v) in part.vertices.iter().enumerate() {
-            let color = part.vertex_color(i);
-            let Some(raw) = content_term(v) else {
-                skeleton.push((color, None));
-                local.push((color, None));
-                continue;
-            };
-            let canonical = canonicalize_alpha_eq_ac(&raw);
-            let skel = canonical.clone().map_free(&mut |v| LVar::new("_", v.sort, 0));
-            skeleton.push((color, Some(fingerprint_term(&skel))));
-            local.push((color, Some(fingerprint_term(&canonical))));
-            let mut raw_vars = BTreeSet::new();
-            raw.for_each_free(&mut |v| {
-                raw_vars.insert(*v);
-            });
-            for v in raw_vars {
-                occurrences.entry(v).or_default().push(i);
-            }
-            collect_positions(&raw, i, &mut String::new(), &mut positions);
-        }
-        let mut occurrences: Vec<(LSort, Vec<usize>)> =
-            occurrences.into_iter().map(|(v, vs)| (v.sort, vs)).collect();
-        occurrences.sort();
-        let mut positions: Vec<(LSort, Vec<(usize, String)>)> = positions
-            .into_iter()
-            .map(|(v, mut ps)| {
-                ps.sort();
-                (v.sort, ps)
-            })
-            .collect();
-        positions.sort();
-        Refinements {
-            skeleton,
-            local,
-            occurrences,
-            positions,
-        }
-    }
-
-    /// Like [`Self::preserves_occurrences`], with positions: whether some
-    /// literal permutation maps every (vertex, path) occurrence onto
-    /// (`g`(vertex), path).
-    fn preserves_positions(&self, g: &Permutation) -> bool {
-        let mut mapped: Vec<(LSort, Vec<(usize, String)>)> = self
-            .positions
-            .iter()
-            .map(|(sort, ps)| {
-                let mut image: Vec<(usize, String)> =
-                    ps.iter().map(|(v, p)| (g.image_of(*v), p.clone())).collect();
-                image.sort();
-                (*sort, image)
-            })
-            .collect();
-        mapped.sort();
-        mapped == self.positions
-    }
-
-    /// Whether some literal permutation maps every vertex's literal set onto
-    /// its image's under `g`, i.e. whether `g` survives literal vertices.
-    fn preserves_occurrences(&self, g: &Permutation) -> bool {
-        let mut mapped: Vec<(LSort, Vec<usize>)> = self
-            .occurrences
-            .iter()
-            .map(|(sort, vs)| {
-                let mut image: Vec<usize> = vs.iter().map(|&v| g.image_of(v)).collect();
-                image.sort_unstable();
-                (*sort, image)
-            })
-            .collect();
-        mapped.sort();
-        mapped == self.occurrences
-    }
-}
-
-/// Whether `g` maps every vertex to one with the same key.
-fn preserves<K: PartialEq>(keys: &[K], g: &Permutation) -> bool {
-    (0..keys.len()).all(|v| keys[g.image_of(v)] == keys[v])
-}
-
-/// Automorphism group sizes of one graph part under the current coloring
-/// and each candidate refinement ([`Refinements`]), plus the survivor count
-/// -- the size of the CONTENT automorphism group, i.e. what a complete
-/// encoding would reduce `|Aut(G)|` to.
-#[derive(Debug, Default, Clone, Copy)]
-struct GroupSizes {
-    current: usize,
-    skeleton: usize,
-    local: usize,
-    local_occurrences: usize,
-    local_positions: usize,
-    survivors: usize,
-}
-
-impl GroupSizes {
-    /// The cheapest candidate that makes the group equal the content
-    /// automorphisms.
-    fn category(&self) -> &'static str {
-        if self.current == self.survivors {
-            "genuine"
-        } else if self.skeleton == self.survivors {
-            "fixed_by_skeleton"
-        } else if self.local == self.survivors {
-            "fixed_by_local_content"
-        } else if self.local_occurrences == self.survivors {
-            "fixed_by_literal_incidence"
-        } else if self.local_positions == self.survivors {
-            "fixed_by_positional_incidence"
-        } else {
-            "residual"
-        }
-    }
-}
-
-fn truncate(s: String, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s;
-    }
-    let cut: String = s.chars().take(max).collect();
-    format!("{cut}…")
-}
-
-fn vertex_label(v: &VertexKind) -> Option<String> {
-    Some(match v {
-        VertexKind::RuleInstance(nid, ru) => format!("rule {} @ {nid}", rule_name_string(ru)),
-        VertexKind::Action(nid, fact) => {
-            format!("action {} @ {nid}", truncate(pretty_fact(fact), 110))
-        }
-        VertexKind::Dummy(nid) => format!("dummy {nid}"),
-        _ => return None,
-    })
-}
-
-/// A human-readable account of `part`'s automorphism generators: for each,
-/// which refinements it survives and which content vertices it moves, plus
-/// the `<` constraints of every moved `Dummy` timepoint (where they come
-/// from is usually the reason the timepoints look alike).
-fn automorphism_report(
-    sys: &System,
-    part: &GraphPart,
-    generators: &[Permutation],
-    refinements: &Refinements,
-    sizes: GroupSizes,
-) -> String {
-    use std::fmt::Write as _;
-    let mut out = format!(
-        "|Aut(G)|={} skeleton={} local={} local+incidence={} local+positional={} survivors={}",
-        sizes.current,
-        sizes.skeleton,
-        sizes.local,
-        sizes.local_occurrences,
-        sizes.local_positions,
-        sizes.survivors
-    );
-    let mut moved_dummies = BTreeSet::new();
-    for (k, g) in generators.iter().enumerate() {
-        let yes_no = |b: bool| if b { "kept" } else { "removed" };
-        let local = preserves(&refinements.local, g);
-        write!(
-            out,
-            "\n  generator {} -- skeleton: {}, local: {}, +incidence: {}, +positional: {}",
-            k + 1,
-            yes_no(preserves(&refinements.skeleton, g)),
-            yes_no(local),
-            yes_no(local && refinements.preserves_occurrences(g)),
-            yes_no(local && refinements.preserves_positions(g)),
-        )
-        .ok();
-        for v in 0..part.vertices.len() {
-            let w = g.image_of(v);
-            // Each transposition once; longer cycles as individual arrows.
-            if w == v || (g.image_of(w) == v && w < v) {
-                continue;
-            }
-            let (Some(from), Some(to)) = (vertex_label(&part.vertices[v]), vertex_label(&part.vertices[w]))
-            else {
-                continue;
-            };
-            let arrow = if g.image_of(w) == v { "<->" } else { "->" };
-            write!(out, "\n      {from}  {arrow}  {to}").ok();
-            for x in [v, w] {
-                if let VertexKind::Dummy(nid) = &part.vertices[x] {
-                    moved_dummies.insert(*nid);
-                }
-            }
-        }
-    }
-    if !moved_dummies.is_empty() {
-        write!(out, "\n  < constraints of moved dummy timepoints:").ok();
-        for la in sys.less_atoms_in_set_order() {
-            if moved_dummies.contains(&la.smaller) || moved_dummies.contains(&la.larger) {
-                write!(out, "\n      {} < {}  ({:?})", la.smaller, la.larger, la.reason).ok();
-            }
-        }
-    }
-    out
-}
-
-/// The coarse label [`SwapKindCounts`] buckets by -- content-free
-/// structural markers vs. real rule-instance/action content.
-fn vertex_kind_label(v: &VertexKind) -> &'static str {
-    match v {
-        VertexKind::RuleInstance(_, _) => "RuleInstance",
-        VertexKind::Action(_, _) => "Action",
-        VertexKind::Dummy(_) => "Dummy",
-        VertexKind::EdgeRelation(_, _) => "EdgeRelation",
-        VertexKind::LessRelation => "LessRelation",
-        VertexKind::AtTimepointRelation => "AtTimepointRelation",
-        VertexKind::LastAtomRelation => "LastAtomRelation",
-    }
-}
-
-/// Every `(vertex, image)` pair some generator actually moves -- fixed
-/// points skipped. Walks bliss's own minimal generating set, not the full
-/// closed group: a compound element's moved-vertex set is already a subset
-/// of the union of the generators' own, so this is representative without
-/// walking the whole group.
-fn moved_slots<'a>(
-    part: &'a GraphPart,
-    generators: &'a [Permutation],
-) -> impl Iterator<Item = (&'a VertexKind, &'a VertexKind)> + 'a {
-    generators.iter().flat_map(move |g| {
-        (0..part.vertices.len()).filter_map(move |v| {
-            let target = g.image_of(v);
-            (target != v).then(|| (&part.vertices[v], &part.vertices[target]))
-        })
-    })
-}
-
-/// Classifies every vertex slot `part`'s automorphism generators move, by
-/// `VertexKind` and by whether the moved vertex's content equals its
-/// image's up to renaming + AC (`local` keys, [`Refinements::local`]).
-fn classify_generator_moves(
-    part: &GraphPart,
-    generators: &[Permutation],
-    local: &[(Color, Option<Fingerprint>)],
-) -> SwapKindCounts {
-    let mut counts = SwapKindCounts::default();
-    for g in generators {
-        for v in 0..part.vertices.len() {
-            let w = g.image_of(v);
-            if w == v {
-                continue;
-            }
-            let bucket = if local[v] == local[w] {
-                &mut counts.same_local
-            } else {
-                &mut counts.different_local
-            };
-            *bucket.entry(vertex_kind_label(&part.vertices[v])).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-/// See `CanonStageTimes::dummy_less_only_example`.
-fn find_dummy_less_only_example(
-    part: &GraphPart,
-    generators: &[Permutation],
-    swaps: &SwapKindCounts,
-) -> Option<String> {
-    let labels = swaps.labels();
-    if labels.is_empty() || !labels.iter().all(|k| *k == "Dummy" || *k == "LessRelation") {
-        return None;
-    }
-    moved_slots(part, generators).find_map(|slot| match slot {
-        (VertexKind::Dummy(nid_a), VertexKind::Dummy(nid_b)) => Some(format!("{nid_a} <-> {nid_b}")),
-        _ => None,
-    })
-}
-
-/// Re-derives `canonicalize_constraint_system`'s FULL pipeline from
-/// `canon.rs`'s `pub` building blocks: `extract_graph_part` ->
-/// `graph_part_to_dimacs`+`run_bliss` -> `generate_group` ->
-/// `minimal_graph_part_labelings` -> Stage G's
-/// `canonicalize_system_content_seeded_profiled`, run ONCE PER SURVIVOR
-/// exactly like `canonicalize_constraint_system` itself does -- purely to
-/// measure where the time inside it goes.
-///
-/// Returns `None` for the two failure cases `canonicalize_constraint_system`
-/// itself would return `Err` for (both extremely unlikely given the real
-/// call just succeeded moments before this runs on the SAME `sys`) --
-/// the caller should just skip recording stats for that node rather than
-/// treat it as a hard error, since this is diagnostic-only.
-fn profile_canonicalize_stages(
-    sys: &System,
-    colors: &ColorTable,
-    want_report: bool,
-) -> Option<CanonStageTimes> {
-    let t0 = Instant::now();
-    let part = extract_graph_part(sys, colors);
-    let extract = t0.elapsed();
-
-    if part.vertices.is_empty() {
-        // Mirrors `canonicalize_constraint_system`'s own empty-graph-part
-        // fast path -- no bliss call, no automorphism group at all, and
-        // Stage G still runs (once, on the trivial empty labelling).
-        let (graph_term, labelling) = canonicalize_graph_part_seeded(&[], &BTreeSet::new());
-        let (_, content) = canonicalize_system_content_seeded_profiled(sys, &labelling, graph_term);
-        return Some(CanonStageTimes {
-            extract,
-            content,
-            survivors: 1,
-            ..Default::default()
-        });
-    }
-
-    let t1 = Instant::now();
-    let dimacs = graph_part_to_dimacs(&part).ok()?;
-    let result = run_bliss(&dimacs).ok()?;
-    let bliss = t1.elapsed();
-
-    let t2 = Instant::now();
-    let group = generate_group(&result.generators, part.vertices.len());
-    let group_size = group.len();
-    let group_closure = t2.elapsed();
-
-    // `minimal_graph_part_labelings` closes the group again internally;
-    // closure is negligible next to minimization, so `group_minimization`
-    // simply absorbs that second closure.
-    let t3 = Instant::now();
-    let (_, survivors) = minimal_graph_part_labelings(&part, &result);
-    let group_minimization = t3.elapsed();
-
-    // Stage D (re-derive the SEEDED labelling for each survivor) + Stage G,
-    // once per survivor. Stage D re-runs the same AC-canonicalization
-    // machinery as minimization, so it gets its own timer.
-    let mut stage_d_per_survivor = Duration::ZERO;
-    let mut content = ContentStageTimes::default();
-    for (i, labeling) in survivors.iter().enumerate() {
-        let t4 = Instant::now();
-        let ordered = canonical_vertex_order(&part, labeling);
-        let edges = canonical_edges(&part, labeling);
-        let (graph_term, labelling) = canonicalize_graph_part_seeded(&ordered, &edges);
-        stage_d_per_survivor += t4.elapsed();
-        let (_, c) = canonicalize_system_content_seeded_profiled(sys, &labelling, graph_term);
-        // The counts describe `sys` itself, identical for every survivor:
-        // take them once, and add only the durations after that.
-        if i == 0 {
-            content = c;
-        } else {
-            content.add_durations(&c);
-        }
-    }
-
-    // Not part of canonicalization: how much finer colorings/encodings
-    // would shrink the group (see `Refinements`).
-    let t5 = Instant::now();
-    let refinements = Refinements::new(&part);
-    let count = |keep: &dyn Fn(&Permutation) -> bool| group.iter().filter(|g| keep(g)).count();
-    let group_sizes = GroupSizes {
-        current: group_size,
-        skeleton: count(&|g| preserves(&refinements.skeleton, g)),
-        local: count(&|g| preserves(&refinements.local, g)),
-        local_occurrences: count(&|g| {
-            preserves(&refinements.local, g) && refinements.preserves_occurrences(g)
-        }),
-        local_positions: count(&|g| {
-            preserves(&refinements.local, g) && refinements.preserves_positions(g)
-        }),
-        survivors: survivors.len(),
-    };
-    assert!(
-        group_sizes.local_positions >= group_sizes.survivors,
-        "every content automorphism preserves local content and positional literal \
-         incidence: {group_sizes:?}"
-    );
-    // The content automorphisms themselves: the elements whose relabelled
-    // graph-part term equals the identity's. `positional_exact` = they are
-    // exactly the elements preserving local content + positional incidence
-    // (containment plus equal size), not merely as many.
-    let graph_term = |lab: &Permutation| {
-        canonicalize_graph_part(&canonical_vertex_order(&part, lab), &canonical_edges(&part, lab))
-    };
-    let base = graph_term(&result.canonical_labeling);
-    let content_automorphisms: Vec<&Permutation> = group
-        .iter()
-        .filter(|g| graph_term(&result.canonical_labeling.compose(g)) == base)
-        .collect();
-    assert_eq!(content_automorphisms.len(), survivors.len());
-    let positional_exact = group_sizes.local_positions == content_automorphisms.len()
-        && content_automorphisms
-            .iter()
-            .all(|g| preserves(&refinements.local, g) && refinements.preserves_positions(g));
-    let swaps = classify_generator_moves(&part, &result.generators, &refinements.local);
-    let dummy_less_only_example = find_dummy_less_only_example(&part, &result.generators, &swaps);
-    let report = (want_report && group_size > 1)
-        .then(|| automorphism_report(sys, &part, &result.generators, &refinements, group_sizes));
-    let analysis = t5.elapsed();
-
-    Some(CanonStageTimes {
-        extract,
-        bliss,
-        group_closure,
-        group_minimization,
-        stage_d_per_survivor,
-        content,
-        vertices: part.vertices.len(),
-        edges: part.edges.len(),
-        generators: result.generators.len(),
-        group_size,
-        survivors: survivors.len(),
-        swaps,
-        dummy_less_only_example,
-        group_sizes,
-        positional_exact,
-        analysis,
-        report,
-    })
-}
-
-/// `PROFILE_CANON=1` totals, accumulated over every profiled occurrence.
-#[derive(Default)]
-struct CanonProfile {
-    nodes: usize,
-    /// Coarse wall time of each whole `profile_canonicalize_stages` call,
-    /// measured from OUTSIDE it -- a cross-check against the sum of its own
-    /// internal per-stage timers, to tell a genuine "first call vs second
-    /// call" asymmetry (e.g. subprocess-spawn cost growing with the parent's
-    /// memory footprint) apart from an accounting bug in this tool.
-    wall: Duration,
-    extract: Duration,
-    bliss: Duration,
-    group_closure: Duration,
-    group_minimization: Duration,
-    stage_d_per_survivor: Duration,
-    /// Stage G, summed across nodes (durations AND counts).
-    content: ContentStageTimes,
-    max_eq_store_conj_alternatives: usize,
-    total_vertices: usize,
-    total_edges: usize,
-    max_generators: usize,
-    max_group_size: usize,
-    max_survivors: usize,
-    total_group_size: u64,
-    // How much of the automorphism group `minimal_graph_part_labelings`
-    // keeps as survivors: survivors ~= group_size means the group reflects
-    // REAL alpha-equivalences (minimization work is inherent); survivors <<
-    // group_size means bliss's coloring can't tell apart vertices whose
-    // content differs, so a finer coloring could shrink the group itself.
-    // Nontrivial groups (|Aut(G)| > 1) only: a trivial group's ratio is
-    // vacuously 1/1 and would just dilute the average.
-    nontrivial_nodes: usize,
-    nontrivial_survivors: u64,
-    nontrivial_group_size: u64,
-    nontrivial_all_survive: usize,
-    nontrivial_ratio_sum: f64,
-    /// group_size -> (node count, total survivors), so the relationship
-    /// between group size and survivor count can be read off directly
-    /// rather than guessed from one aggregate ratio.
-    group_size_histogram: BTreeMap<usize, (u64, u64)>,
-    swap_kinds: SwapKindCounts,
-    /// Group sizes under each candidate refinement, summed over
-    /// nontrivial-group nodes (each sum = group elements minimization would
-    /// canonicalize), and how many of those nodes each makes trivial.
-    refined_sums: GroupSizes,
-    refined_trivial: GroupSizes,
-    /// Nontrivial-group nodes by [`GroupSizes::category`].
-    categories: BTreeMap<&'static str, usize>,
-    /// Nontrivial-group nodes where local content + positional incidence
-    /// keeps exactly the content automorphisms.
-    positional_exact: usize,
-    /// Refinement-analysis time (see `CanonStageTimes::analysis`).
-    analysis: Duration,
-}
-
-impl CanonProfile {
-    fn record(&mut self, s: &CanonStageTimes) {
-        self.nodes += 1;
-        self.extract += s.extract;
-        self.bliss += s.bliss;
-        self.group_closure += s.group_closure;
-        self.group_minimization += s.group_minimization;
-        self.stage_d_per_survivor += s.stage_d_per_survivor;
-        self.content += &s.content;
-        self.max_eq_store_conj_alternatives = self
-            .max_eq_store_conj_alternatives
-            .max(s.content.num_eq_store_conj_alternatives);
-        self.total_vertices += s.vertices;
-        self.total_edges += s.edges;
-        self.max_generators = self.max_generators.max(s.generators);
-        self.max_group_size = self.max_group_size.max(s.group_size);
-        self.max_survivors = self.max_survivors.max(s.survivors);
-        self.total_group_size += s.group_size as u64;
-        if s.group_size > 1 {
-            self.nontrivial_nodes += 1;
-            self.nontrivial_survivors += s.survivors as u64;
-            self.nontrivial_group_size += s.group_size as u64;
-            self.nontrivial_ratio_sum += s.survivors as f64 / s.group_size as f64;
-            if s.survivors == s.group_size {
-                self.nontrivial_all_survive += 1;
-            }
-            let entry = self.group_size_histogram.entry(s.group_size).or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += s.survivors as u64;
-            self.swap_kinds.merge(&s.swaps);
-            let g = s.group_sizes;
-            let (sums, trivial) = (&mut self.refined_sums, &mut self.refined_trivial);
-            for (sum, triv, size) in [
-                (&mut sums.current, &mut trivial.current, g.current),
-                (&mut sums.skeleton, &mut trivial.skeleton, g.skeleton),
-                (&mut sums.local, &mut trivial.local, g.local),
-                (&mut sums.local_occurrences, &mut trivial.local_occurrences, g.local_occurrences),
-                (&mut sums.local_positions, &mut trivial.local_positions, g.local_positions),
-                (&mut sums.survivors, &mut trivial.survivors, g.survivors),
-            ] {
-                *sum += size;
-                *triv += usize::from(size == 1);
-            }
-            *self.categories.entry(g.category()).or_insert(0) += 1;
-            self.positional_exact += usize::from(s.positional_exact);
-        }
-        self.analysis += s.analysis;
-    }
-
-    /// `t_canonicalize` is `PROFILE=1`'s real canonicalization time, when
-    /// that flag is also on.
-    fn print(&self, t_canonicalize: Option<Duration>) {
-        let c = &self.content;
-        let total = self.extract
-            + self.bliss
-            + self.group_closure
-            + self.group_minimization
-            + self.stage_d_per_survivor
-            + c.total_duration();
-        let row = |label: &str, d: Duration, note: String| {
-            println!(
-                "  {label:<45}{:>8.2}s ({:>5.1}%){note}",
-                d.as_secs_f64(),
-                pct(d, total)
-            );
-        };
-        println!(
-            "\n--- PROFILE_CANON: canonicalize_constraint_system's OWN internal \
-             stages, summed over {} occurrence(s) (re-derived a second time, discarded \
-             -- see the module docs) ---",
-            self.nodes
-        );
-        row("Stage A  extract_graph_part:", self.extract, String::new());
-        row("Stage C  dimacs + external bliss subprocess:", self.bliss, String::new());
-        row(
-            "Stage F  automorphism GROUP CLOSURE:",
-            self.group_closure,
-            "  (generate_group)".into(),
-        );
-        row(
-            "Stage F  automorphism group MINIMIZATION:",
-            self.group_minimization,
-            "  (re-canonicalize the graph part once per group element)".into(),
-        );
-        row(
-            "Stage D  re-seed per survivor:",
-            self.stage_d_per_survivor,
-            "  (canonicalize_graph_part_seeded, once per SURVIVOR -- same \
-             AC-canonicalization cost class as group MINIMIZATION above, just re-run seeded)"
-                .into(),
-        );
-        row(
-            "Stage G  formulas:",
-            c.formulas,
-            format!("  ({} formula(s) total)", c.num_formulas),
-        );
-        row(
-            "Stage G  solved_formulas:",
-            c.solved_formulas,
-            format!("  ({} total)", c.num_solved_formulas),
-        );
-        row("Stage G  lemmas:", c.lemmas, format!("  ({} total)", c.num_lemmas));
-        row(
-            "Stage G  eq_store.subst:",
-            c.eq_store_subst,
-            format!("  ({} entries total)", c.num_eq_store_subst),
-        );
-        row(
-            "Stage G  eq_store.conj:",
-            c.eq_store_conj,
-            format!(
-                "  ({} EqDisj / {} alternatives total, max {} alternatives on one node)",
-                c.num_eq_store_conj,
-                c.num_eq_store_conj_alternatives,
-                self.max_eq_store_conj_alternatives
-            ),
-        );
-        row(
-            "Stage G  subterm_store:",
-            c.subterm_store,
-            format!(
-                "  ({} subterm/solved-subterm/neg-subterm entries total)",
-                c.num_subterms + c.num_solved_subterms + c.num_neg_subterms
-            ),
-        );
-        row(
-            "Stage G  goals:",
-            c.goals,
-            format!("  ({} goal(s) total, before dropping Split)", c.num_goals),
-        );
-        println!(
-            "  sum of measured stages: {:.2}s (Stage G is run ONCE PER SURVIVOR, already \
-             summed accordingly -- see CanonStageTimes::content's own doc comment)",
-            total.as_secs_f64()
-        );
-        println!(
-            "  coarse wall time of the whole profile_canonicalize_stages call: {:.2}s \
-             (cross-check against the {:.2}s sum above -- a big gap between THESE two means \
-             an accounting bug in this tool, not a real pipeline stage; excludes {:.2}s of \
-             refinement analysis)",
-            self.wall.saturating_sub(self.analysis).as_secs_f64(),
-            total.as_secs_f64(),
-            self.analysis.as_secs_f64()
-        );
-        if let Some(t_canonicalize) = t_canonicalize {
-            println!(
-                "  (vs. real canonicalize_constraint_system time t_canonicalize={:.2}s from \
-                 PROFILE above -- a gap between THIS and the coarse wall time just above is \
-                 the interesting one: same pipeline, same node, run twice back to back, \
-                 should cost about the same)",
-                t_canonicalize.as_secs_f64()
-            );
-        }
-        if self.nodes == 0 {
-            return;
-        }
-        println!(
-            "  graph size: {:.1} vertices/node, {:.1} edges/node (avg)",
-            self.total_vertices as f64 / self.nodes as f64,
-            self.total_edges as f64 / self.nodes as f64
-        );
-        println!(
-            "  automorphism group: max |generators|={}, max |Aut(G)|={}, avg |Aut(G)|={:.1}, \
-             max |survivors|={}",
-            self.max_generators,
-            self.max_group_size,
-            self.total_group_size as f64 / self.nodes as f64,
-            self.max_survivors
-        );
-        if self.nontrivial_nodes == 0 {
-            return;
-        }
-        let n = self.nontrivial_nodes;
-        println!(
-            "  survivors/|Aut(G)| (nodes with a NONTRIVIAL group only, n={n}): \
-             avg ratio={:.3} (unweighted per-node average), \
-             pooled ratio={:.3} (total survivors / total |Aut(G)|), \
-             {}/{n} nodes ({:.1}%) have EVERY \
-             automorphism survive minimization (survivors == |Aut(G)|)",
-            self.nontrivial_ratio_sum / n as f64,
-            self.nontrivial_survivors as f64 / self.nontrivial_group_size as f64,
-            self.nontrivial_all_survive,
-            100.0 * self.nontrivial_all_survive as f64 / n as f64
-        );
-        println!(
-            "  a ratio near 1.0 means bliss's coloring already finds close to the REAL \
-             alpha-equivalence classes (minimization work is inherent, not wasted); a \
-             ratio well below 1.0 means many reported automorphisms are SPURIOUS -- \
-             indistinguishable by color/structure alone but not actually content-equal \
-             -- and a finer `ColorTable` could shrink |Aut(G)| itself (and so both \
-             Stage F and Stage D's cost) without changing the canonical RESULT"
-        );
-        println!("  |Aut(G)| -> (node count, avg survivors):");
-        for (group_size, (count, total_survivors)) in &self.group_size_histogram {
-            println!(
-                "    {group_size:>3} -> {count:>5} node(s), avg survivors={:.2} \
-                 (ratio={:.3})",
-                *total_survivors as f64 / *count as f64,
-                *total_survivors as f64 / (*count as f64 * *group_size as f64)
-            );
-        }
-        println!(
-            "\n  WHAT the automorphism generators actually move, by VertexKind \
-             (summed over every generator on every nontrivial-group node -- a \
-             transposition contributes 2 moved slots, a k-cycle k; \"same\" means the \
-             moved vertex's content equals its image's up to renaming + AC, \"different\" \
-             that it doesn't, i.e. a content-aware color would forbid the move):"
-        );
-        let kinds = &self.swap_kinds;
-        for label in kinds.labels() {
-            let same = kinds.same_local.get(label).copied().unwrap_or(0);
-            let different = kinds.different_local.get(label).copied().unwrap_or(0);
-            println!(
-                "    {label:<20} moved={:>7}  same={same:>7}  different={different:>7}",
-                same + different
-            );
-        }
-        let (sums, trivial) = (&self.refined_sums, &self.refined_trivial);
-        println!(
-            "\n  CANDIDATE REFINEMENTS: summed |Aut(G)| over the {n} nontrivial-group nodes \
-             (= group elements MINIMIZATION canonicalizes), relative size, and nodes left \
-             with a trivial group:"
-        );
-        for (label, sum, triv) in [
-            ("current coloring", sums.current, trivial.current),
-            ("+ content skeleton (symbols + sorts)", sums.skeleton, trivial.skeleton),
-            ("+ local content (canonical form)", sums.local, trivial.local),
-            ("+ local content + literal incidence", sums.local_occurrences, trivial.local_occurrences),
-            ("+ local content + positional incidence", sums.local_positions, trivial.local_positions),
-            ("content automorphisms (floor)", sums.survivors, trivial.survivors),
-        ] {
-            println!(
-                "    {label:<40} {sum:>8}  ({:>5.3})  trivial on {triv:>5}/{n}",
-                sum as f64 / sums.current as f64
-            );
-        }
-        println!(
-            "  local content + positional incidence keeps EXACTLY the content automorphisms \
-             (same set) on {}/{n} nodes",
-            self.positional_exact
-        );
-        println!(
-            "  nodes by what would make |Aut(G)| equal the content automorphisms: {}",
-            self.categories
-                .iter()
-                .map(|(c, k)| format!("{c}={k}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
-}
-
 /// Wall time per stage, always measured (written to the JSON's `timing`;
 /// `PROFILE=1` also prints it). What a search that merges canonically equal
 /// systems would pay is `canonicalize` + `fingerprint` for every occurrence,
@@ -1768,6 +903,186 @@ struct StageTimers {
 }
 
 // =============================================================================
+// What canonicalization did (the JSON's `canon` object)
+// =============================================================================
+
+/// Count, sum, mean, median, 95th percentile and maximum of `values`.
+fn distribution(values: &[f64]) -> Value {
+    if values.is_empty() {
+        return json!({"n": 0});
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let sum: f64 = sorted.iter().sum();
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    json!({
+        "n": sorted.len(),
+        "sum": sum,
+        "mean": sum / sorted.len() as f64,
+        "p50": at(0.5),
+        "p95": at(0.95),
+        "max": sorted[sorted.len() - 1],
+    })
+}
+
+/// What canonicalization did over a run.
+#[derive(Default)]
+struct CanonSummary {
+    /// Wall time per canonicalization, the generator check included.
+    wall_secs: Vec<f64>,
+    /// The time a search would pay: the wall time minus the generator check
+    /// (a diagnostic only).
+    secs: Vec<f64>,
+    vertices: Vec<f64>,
+    edges: Vec<f64>,
+    /// `|Aut|` of the term graph (1 where bliss did not run).
+    aut: Vec<f64>,
+    generators: u64,
+    /// See `TermGraphStats`.
+    generators_moving_free_vars: u64,
+    generators_moving_vars: u64,
+    non_genuine_generators: u64,
+    /// What the generators permute (`TermGraphStats::generator_moves`).
+    generator_moves: BTreeMap<String, u64>,
+    /// Occurrences with a non-genuine generator, with what it moves and
+    /// which fields of the form it changes.
+    non_genuine_examples: Vec<Value>,
+    bliss_skipped: u64,
+    term_secs: f64,
+    graph_secs: f64,
+    bliss_secs: f64,
+    content_secs: f64,
+    check_secs: f64,
+}
+
+impl CanonSummary {
+    fn record(&mut self, wall: Duration, s: &TermGraphStats) {
+        self.wall_secs.push(wall.as_secs_f64());
+        let production = s.time_term + s.time_graph + s.time_bliss + s.time_content;
+        self.secs.push(production.as_secs_f64());
+        self.vertices.push(s.vertices as f64);
+        self.edges.push(s.edges as f64);
+        self.aut.push(
+            s.aut_size
+                .as_deref()
+                .map_or(1.0, |a| a.parse().unwrap_or(f64::NAN)),
+        );
+        self.generators += s.generators as u64;
+        self.generators_moving_free_vars += s.generators_moving_free_vars as u64;
+        self.generators_moving_vars += s.generators_moving_vars as u64;
+        self.non_genuine_generators += s.non_genuine_generators as u64;
+        for (moved, n) in &s.generator_moves {
+            *self.generator_moves.entry(moved.clone()).or_insert(0) += *n as u64;
+        }
+        self.bliss_skipped += u64::from(!s.bliss_ran);
+        self.term_secs += s.time_term.as_secs_f64();
+        self.graph_secs += s.time_graph.as_secs_f64();
+        self.bliss_secs += s.time_bliss.as_secs_f64();
+        self.content_secs += s.time_content.as_secs_f64();
+        self.check_secs += s.time_check.as_secs_f64();
+    }
+
+    /// Logs and keeps (up to [`FAILURE_EXAMPLES_LIMIT`]) an occurrence whose
+    /// term graph has a generator that is not a symmetry of the system.
+    fn record_non_genuine(&mut self, stats: &TermGraphStats, processed: u64, path: String) {
+        if stats.non_genuine_generators == 0 {
+            return;
+        }
+        log!(
+            "term graph: {} non-genuine generator(s) at processed={processed} {path}: moves {:?}, \
+             fields {:?}",
+            stats.non_genuine_generators,
+            stats.non_genuine_moves,
+            stats.non_genuine_fields
+        );
+        if self.non_genuine_examples.len() < FAILURE_EXAMPLES_LIMIT {
+            self.non_genuine_examples.push(json!({
+                "processed": processed,
+                "path": path,
+                "moves": stats.non_genuine_moves,
+                "fields": stats.non_genuine_fields,
+            }));
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "canonicalizations": self.secs.len(),
+            "secs": distribution(&self.secs),
+            "wall_secs": distribution(&self.wall_secs),
+            "vertices": distribution(&self.vertices),
+            "edges": distribution(&self.edges),
+            "aut": distribution(&self.aut),
+            "nontrivial_aut": self.aut.iter().filter(|&&a| a > 1.0).count(),
+            "generators": self.generators,
+            "generators_moving_free_vars": self.generators_moving_free_vars,
+            "generators_moving_vars": self.generators_moving_vars,
+            "non_genuine_generators": self.non_genuine_generators,
+            "generator_moves": self.generator_moves,
+            "non_genuine_examples": self.non_genuine_examples,
+            "bliss_skipped": self.bliss_skipped,
+            "phase_secs": {
+                "term": self.term_secs,
+                "graph": self.graph_secs,
+                "bliss": self.bliss_secs,
+                "content": self.content_secs,
+                "check": self.check_secs,
+            },
+        })
+    }
+
+    /// One line for the terminal.
+    fn line(&self) -> String {
+        let total: f64 = self.secs.iter().sum();
+        let max_aut = self.aut.iter().copied().fold(1.0, f64::max);
+        let mut line = format!(
+            "{} canonicalizations in {total:.2}s (mean {:.2}ms), vertices mean {:.0}, \
+             |Aut| > 1 in {}, max |Aut| {max_aut:.3e}, generators {} (moving free variables {}, \
+             not genuine {}), bliss skipped {}",
+            self.secs.len(),
+            1000.0 * total / self.secs.len().max(1) as f64,
+            self.vertices.iter().sum::<f64>() / self.vertices.len().max(1) as f64,
+            self.aut.iter().filter(|&&a| a > 1.0).count(),
+            self.generators,
+            self.generators_moving_free_vars,
+            self.non_genuine_generators,
+            self.bliss_skipped
+        );
+        let mut moves: Vec<(&String, &u64)> = self.generator_moves.iter().collect();
+        moves.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        if !moves.is_empty() {
+            let top: Vec<String> = moves
+                .iter()
+                .take(3)
+                .map(|(m, n)| format!("{m} ×{n}"))
+                .collect();
+            line += &format!("; generators move {}", top.join(", "));
+        }
+        line
+    }
+}
+
+/// `DUMP_TERM_GRAPH_AT`: `sys` as a term, its graph as bliss input, and the
+/// key of every vertex.
+fn dump_term_graph(sys: &System, stem: &str) {
+    let term = system_to_term(sys);
+    let graph = term_to_graph(&term);
+    let keys: String = graph
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("{} {} {:?}\n", i + 1, graph.colors[i], k))
+        .collect();
+    let written = std::fs::write(format!("{stem}.term.txt"), format!("{term}\n"))
+        .and_then(|()| match to_dimacs(&graph.colors, &graph.edges) {
+            Ok(dimacs) => std::fs::write(format!("{stem}.tg.dimacs"), dimacs),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        })
+        .and_then(|()| std::fs::write(format!("{stem}.tg.keys"), keys));
+    log!("DUMP_TERM_GRAPH_AT: wrote {stem}.term.txt/.tg.dimacs/.tg.keys: {written:?}");
+}
+
+// =============================================================================
 // Exploration
 // =============================================================================
 
@@ -1777,40 +1092,45 @@ struct Flags {
     trace: bool,
     dump_formulas: bool,
     profile: bool,
-    profile_canon: bool,
-    dump_dummy_swaps: bool,
     /// `DUMP_CANON_PANIC=1`: print the first system whose canonicalization
     /// panics.
     dump_canon_panic: bool,
-    /// `DUMP_DIMACS_AT=N`, with the `--out` path the dump is named after.
-    dump_dimacs_at: Option<(u64, String)>,
-    /// `DUMP_AUTOMORPHISMS=N`: examples to print per [`GroupSizes::category`].
-    dump_automorphisms: usize,
     /// `DUMP_MERGES_INTO=ID[,ID...]`, with the `--out` path the dumps are
     /// named after.
     dump_merges_into: Option<(BTreeSet<OrId>, String)>,
+    /// `DUMP_TERM_GRAPH_AT=N`, with the `--out` path the dump is named after.
+    dump_term_graph_at: Option<(u64, String)>,
+    /// Check every automorphism generator (`TERM_GRAPH_CHECK`, on unless
+    /// `0`).
+    term_graph_check: bool,
+}
+
+/// A node awaiting expansion: the `System` only it still carries, and its
+/// candidate methods if already computed (for the method check).
+struct Queued {
+    id: OrId,
+    sys: System,
+    methods: Option<Vec<ProofMethod>>,
 }
 
 struct Explorer<'a> {
     ctx: &'a ProofContext,
     flags: Flags,
+    /// What canonicalization did.
+    canon_summary: CanonSummary,
     max_depth: usize,
     no_merge: bool,
+    /// `--no-canon`: never canonicalize (implies `no_merge`).
+    no_canon: bool,
     /// `--top-methods`: apply only this many candidate methods per node.
     top_methods: Option<usize>,
     graph: Graph,
     by_fingerprint: FastMap<CanonicalSystemFingerprint, OrId>,
-    /// Nodes awaiting expansion, with the `System` only they still carry and
-    /// its candidate methods if already computed (for the method check).
-    queue: VecDeque<(OrId, System, Option<Vec<ProofMethod>>)>,
+    queue: VecDeque<Queued>,
     processed: u64,
     canonicalize_failures: usize,
     method_check: MethodCheck,
     timers: StageTimers,
-    canon_profile: CanonProfile,
-    dummy_swap_examples_shown: usize,
-    /// `DUMP_AUTOMORPHISMS` examples printed so far, per category.
-    automorphism_examples_shown: BTreeMap<&'static str, usize>,
     started: Instant,
     /// `--time-budget`: stop expanding once the PROCESS has run this long.
     time_budget: Option<Duration>,
@@ -1854,8 +1174,6 @@ impl StopReason {
 
 const FAILURE_EXAMPLES_LIMIT: usize = 20;
 
-const DUMMY_SWAP_EXAMPLES_LIMIT: usize = 3;
-
 /// Results of checking, at every merge, that the merged system offers the
 /// same candidate proof methods as the representative (see the module docs).
 #[derive(Default)]
@@ -1893,7 +1211,7 @@ impl Explorer<'_> {
         self.graph.processed_by_depth[depth] += 1;
 
         self.publish_progress();
-        if self.flags.progress && self.processed % 20 == 0 {
+        if self.flags.progress && self.processed.is_multiple_of(20) {
             let elapsed = self.started.elapsed().as_secs_f64();
             eprintln!(
                 "[progress] {} canonicalized in {elapsed:.1}s ({:.2}/s), depth={depth}, \
@@ -1912,23 +1230,34 @@ impl Explorer<'_> {
         // A canonicalization panic (e.g. a `theta` miss) must not end the
         // whole exploration: this tool's job is to FIND such gaps across
         // every path, not stop at the first.
-        if let Some((n, out)) = &self.flags.dump_dimacs_at {
-            if self.processed == *n {
-                dump_dimacs(&sys, &ctx.color_table, &format!("{out}.occ{n}"));
-            }
+        if let Some((n, out)) = &self.flags.dump_term_graph_at
+            && self.processed == *n
+        {
+            dump_term_graph(&sys, &format!("{out}.occ{n}"));
+        }
+        if self.no_canon {
+            // `expand` ranks the methods, so a node at the depth limit never
+            // pays for it.
+            let id = self.graph.add_node(depth, edge);
+            self.queue.push_back(Queued {
+                id,
+                sys,
+                methods: None,
+            });
+            return id;
         }
         set_activity_step("canonicalize");
+        let options = TermGraphOptions {
+            check_generators: self.flags.term_graph_check,
+            certificate: false,
+        };
         let (canon, canon_took) = timed(&mut self.timers.canonicalize, || {
             catch_unwind(AssertUnwindSafe(|| {
-                canonicalize_constraint_system_with_labelling(&sys, &ctx.color_table)
+                canonicalize_constraint_system_via_term_graph_with_labelling(&sys, options)
             }))
         });
         let mut fingerprint_took = Duration::ZERO;
         let mut methods_took = Duration::ZERO;
-
-        if self.flags.profile_canon {
-            self.profile_canon(&sys, edge);
-        }
 
         let (fingerprint, methods, methods_sig) = match canon {
             Err(payload) => {
@@ -1955,7 +1284,11 @@ impl Explorer<'_> {
                 self.record_canon_failure("error", None, depth, edge, format!("{e:?}"));
                 (None, None, None)
             }
-            Ok(Ok((canon, labelling))) => {
+            Ok(Ok((canon, labelling, stats))) => {
+                self.canon_summary.record(canon_took, &stats);
+                let path = self.graph.path(edge);
+                self.canon_summary
+                    .record_non_genuine(&stats, self.processed, path);
                 let (fp, took) = timed(&mut self.timers.fingerprint, || {
                     fingerprint_constraint_system(&canon)
                 });
@@ -1965,7 +1298,8 @@ impl Explorer<'_> {
                 }
                 set_activity_step("candidate_methods");
                 let start = Instant::now();
-                let methods = candidate_methods(&sys, ctx, depth);
+                let methods = candidate_methods(&sys, ctx, depth)
+                    .unwrap_or_else(|e| panic!("candidate_methods: {e}"));
                 methods_took = start.elapsed();
                 let start = Instant::now();
                 let sig = self.method_signature(&sys, &labelling, &methods, edge);
@@ -1974,19 +1308,19 @@ impl Explorer<'_> {
             }
         };
 
-        if let (Some(fp), false) = (fingerprint, self.no_merge) {
-            if let Some(&existing) = self.by_fingerprint.get(&fp) {
-                // A merged occurrence's candidate methods only feed the
-                // merge check.
-                self.timers.canonicalize_merged += canon_took;
-                self.timers.method_check += methods_took;
-                if let Some(sig) = &methods_sig {
-                    let start = Instant::now();
-                    self.check_methods(existing, sig, depth, edge);
-                    self.timers.method_check += start.elapsed();
-                }
-                return existing;
+        if let (Some(fp), false) = (fingerprint, self.no_merge)
+            && let Some(&existing) = self.by_fingerprint.get(&fp)
+        {
+            // A merged occurrence's candidate methods only feed the merge
+            // check.
+            self.timers.canonicalize_merged += canon_took;
+            self.timers.method_check += methods_took;
+            if let Some(sig) = &methods_sig {
+                let start = Instant::now();
+                self.check_methods(existing, sig, depth, edge);
+                self.timers.method_check += start.elapsed();
             }
+            return existing;
         }
         self.timers.candidate_methods += methods_took;
         let id = self.graph.add_node(depth, edge);
@@ -1999,7 +1333,7 @@ impl Explorer<'_> {
         if let (Some(fp), false) = (fingerprint, self.no_merge) {
             self.by_fingerprint.insert(fp, id);
         }
-        self.queue.push_back((id, sys, methods));
+        self.queue.push_back(Queued { id, sys, methods });
         id
     }
 
@@ -2020,7 +1354,11 @@ impl Explorer<'_> {
         let Some((ids, out)) = &self.flags.dump_merges_into else {
             return;
         };
-        let existing = if self.no_merge { None } else { self.by_fingerprint.get(fp).copied() };
+        let existing = if self.no_merge {
+            None
+        } else {
+            self.by_fingerprint.get(fp).copied()
+        };
         // A new node gets the next id (`Graph::add_node`).
         let id = existing.unwrap_or(self.graph.nodes.len() as OrId);
         if !ids.contains(&id) {
@@ -2034,7 +1372,11 @@ impl Explorer<'_> {
             "node {id}, occurrence {} at depth {depth}, {}\npath: {}\nfingerprint: {}\n\n\
              === system ===\n{}\n=== labelling ===\n{labelling:#?}\n\n=== canonical form ===\n{}",
             self.processed,
-            if existing.is_some() { "merged into it" } else { "created it" },
+            if existing.is_some() {
+                "merged into it"
+            } else {
+                "created it"
+            },
             self.graph.path(edge),
             fingerprint_hex(fp),
             system_text(sys),
@@ -2136,7 +1478,9 @@ impl Explorer<'_> {
         self.method_check.mismatches += 1;
         let (only_rep, only_dup) = multiset_difference(rep_sig, sig);
         let texts = |ids: &[u32]| -> Vec<&str> {
-            ids.iter().map(|&i| self.graph.methods[i as usize].as_str()).collect()
+            ids.iter()
+                .map(|&i| self.graph.methods[i as usize].as_str())
+                .collect()
         };
         eprintln!(
             "METHOD MISMATCH merging into #{rep} (depth {}) via {}\n  \
@@ -2168,7 +1512,7 @@ impl Explorer<'_> {
     /// spent, or an expansion panics. Nodes left in the queue stay
     /// `Unexpanded`.
     fn run(&mut self, max_nodes: u64) -> StopReason {
-        while let Some((id, sys, methods)) = self.queue.pop_front() {
+        while let Some(queued) = self.queue.pop_front() {
             let stop = if self.processed >= max_nodes {
                 Some(StopReason::MaxNodes)
             } else if self
@@ -2193,9 +1537,10 @@ impl Explorer<'_> {
                     self.queue.len() + 1,
                     memory_mib("VmRSS:").map_or_else(|| "?".to_string(), |m| m.to_string())
                 );
-                self.queue.push_front((id, sys, methods));
+                self.queue.push_front(queued);
                 return stop;
             }
+            let Queued { id, sys, methods } = queued;
             let expanded = catch_unwind(AssertUnwindSafe(|| self.expand(id, &sys, methods)));
             if let Err(payload) = expanded {
                 self.record_expand_panic(id, panic_message(&*payload).to_string());
@@ -2232,7 +1577,7 @@ impl Explorer<'_> {
     }
 
     /// `methods` are `sys`'s candidate methods if `visit` already computed
-    /// them (every node except `canon_err` ones).
+    /// them (every node except `canon_err` ones and with `--no-canon`).
     fn expand(&mut self, id: OrId, sys: &System, methods: Option<Vec<ProofMethod>>) {
         let ctx = self.ctx;
         let depth = self.graph.node(id).depth as usize;
@@ -2246,6 +1591,7 @@ impl Explorer<'_> {
             set_activity("candidate_methods".to_string());
             let (methods, took) = timed(&mut self.timers.candidate_methods, || {
                 candidate_methods(sys, ctx, depth)
+                    .unwrap_or_else(|e| panic!("candidate_methods: {e}"))
             });
             self.graph.node_mut(id).methods_secs += took.as_secs_f64();
             methods
@@ -2287,6 +1633,7 @@ impl Explorer<'_> {
             set_activity(format!("exec_proof_method {step}"));
             let (exec, took) = timed(&mut self.timers.exec_proof_method, || {
                 exec_proof_method(ctx, &method, sys)
+                    .unwrap_or_else(|e| panic!("exec_proof_method: {e}"))
             });
             self.graph.node_mut(id).exec_secs += took.as_secs_f64();
             let Some(cases) = exec else {
@@ -2317,75 +1664,6 @@ impl Explorer<'_> {
             }
         }
     }
-
-    /// `PROFILE_CANON=1` (and `DUMP_DUMMY_SWAPS=1`) for one occurrence.
-    fn profile_canon(&mut self, sys: &System, edge: Option<(OrId, u32, u32)>) {
-        let start = Instant::now();
-        let want_report = self.flags.dump_automorphisms > 0;
-        let profiled = catch_unwind(AssertUnwindSafe(|| {
-            profile_canonicalize_stages(sys, &self.ctx.color_table, want_report)
-        }))
-        .ok()
-        .flatten();
-        self.canon_profile.wall += start.elapsed();
-        let Some(stages) = profiled else {
-            return;
-        };
-        self.canon_profile.record(&stages);
-        if let Some(report) = &stages.report {
-            let category = stages.group_sizes.category();
-            let shown = self.automorphism_examples_shown.entry(category).or_insert(0);
-            if *shown < self.flags.dump_automorphisms {
-                *shown += 1;
-                eprintln!(
-                    "\n[DUMP_AUTOMORPHISMS {category} #{shown}] reached via:\n  {}\n  {report}",
-                    self.graph.path(edge)
-                );
-            }
-        }
-        let Some(example) = &stages.dummy_less_only_example else {
-            return;
-        };
-        if !self.flags.dump_dummy_swaps || self.dummy_swap_examples_shown >= DUMMY_SWAP_EXAMPLES_LIMIT
-        {
-            return;
-        }
-        self.dummy_swap_examples_shown += 1;
-        eprintln!(
-            "\n[DUMP_DUMMY_SWAPS #{}] node with a Dummy/LessRelation-only automorphism \
-             (|Aut(G)|={}, swaps {example}), reached via:\n  {}",
-            self.dummy_swap_examples_shown,
-            stages.group_size,
-            self.graph.path(edge)
-        );
-        eprintln!(
-            "  sys.nodes (rule-instance timepoints): {:?}",
-            sys.nodes.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>()
-        );
-        eprintln!("  sys.less_atoms (i < j constraints):");
-        for la in sys.less_atoms_in_set_order() {
-            eprintln!("    {} < {}  ({:?})", la.smaller, la.larger, la.reason);
-        }
-    }
-}
-
-/// `DUMP_DIMACS_AT`: `sys`'s graph part as bliss input and its vertex kinds.
-fn dump_dimacs(sys: &System, colors: &ColorTable, stem: &str) {
-    let part = extract_graph_part(sys, colors);
-    match graph_part_to_dimacs(&part) {
-        Ok(dimacs) => {
-            let written = std::fs::write(format!("{stem}.dimacs"), dimacs);
-            let kinds: String = part
-                .vertices
-                .iter()
-                .enumerate()
-                .map(|(i, v)| format!("{} {} {} {}\n", i + 1, part.colors[i], vertex_kind_label(v), vertex_label(v).unwrap_or_default()))
-                .collect();
-            let written = written.and_then(|()| std::fs::write(format!("{stem}.vertices"), kinds));
-            log!("DUMP_DIMACS_AT: wrote {stem}.dimacs/.vertices: {written:?}");
-        }
-        Err(e) => log!("DUMP_DIMACS_AT: no graph part to write: {e:?}"),
-    }
 }
 
 /// The rule instances and non-graph part of `sys`, for `DUMP_CANON_PANIC`.
@@ -2410,7 +1688,10 @@ fn system_text(sys: &System) -> String {
     }
     out += "--- edges ---\n";
     for e in sys.edges.iter() {
-        out += &format!("  {}:{} >-> {}:{}\n", e.src.0, e.src.1 .0, e.tgt.0, e.tgt.1 .0);
+        out += &format!(
+            "  {}:{} >-> {}:{}\n",
+            e.src.0, e.src.1 .0, e.tgt.0, e.tgt.1 .0
+        );
     }
     out += "--- less_atoms ---\n";
     for a in sys.less_atoms.iter() {
@@ -2424,45 +1705,46 @@ fn system_text(sys: &System) -> String {
     out
 }
 
-/// A [`CanonicalSystem`] as text, one entry per line.
+/// A [`CanonicalSystem`] as text: its label, then each section.
 fn canonical_text(canon: &CanonicalSystem) -> String {
-    let guarded = |gs: &[tamarin_theory::guarded::Guarded]| {
-        gs.iter()
-            .map(|g| format!("  {}\n", tamarin_theory::pretty_formula::pretty_guarded(g)))
-            .collect::<String>()
-    };
-    format!(
-        "--- graph_part ---\n{}\n--- formulas ---\n{}--- solved_formulas ---\n{}--- lemmas ---\n{}\
-         --- eq_store ---\n{:#?}\n--- subterm_store ---\n{:#?}\n--- goals ---\n{:#?}\n\
-         --- source_kind ---\n{:?}\n--- side ---\n{:?}\n",
-        canon.graph_part,
-        guarded(&canon.formulas),
-        guarded(&canon.solved_formulas),
-        guarded(&canon.lemmas),
-        canon.eq_store,
-        canon.subterm_store,
-        canon.goals,
-        canon.source_kind,
-        canon.side,
-    )
+    let (source_kind, side, contradictory) = canon.label();
+    let mut out = format!(
+        "--- label ---\nsource_kind={source_kind:?} side={side:?} contradictory={contradictory}\n"
+    );
+    for (name, section) in SYSTEM_SECTIONS.iter().zip(canon.sections()) {
+        out.push_str(&format!("--- {name} ---\n{section}\n"));
+    }
+    out
 }
 
 fn dump_formulas(sys: &System, path: &str) {
     eprintln!("--- formulas/solved_formulas at {path} ---");
     for f in sys.formulas.iter() {
-        eprintln!("  formula: {}", tamarin_theory::pretty_formula::pretty_guarded(f));
+        eprintln!(
+            "  formula: {}",
+            tamarin_theory::pretty_formula::pretty_guarded(f)
+        );
     }
     for f in sys.solved_formulas.iter() {
-        eprintln!("  solved_formula: {}", tamarin_theory::pretty_formula::pretty_guarded(f));
+        eprintln!(
+            "  solved_formula: {}",
+            tamarin_theory::pretty_formula::pretty_guarded(f)
+        );
     }
     eprintln!(
         "  nodes: {:?}",
-        sys.nodes.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>()
+        sys.nodes
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .collect::<Vec<_>>()
     );
     eprintln!("  last_atom: {:?}", sys.last_atom);
     eprintln!("  goals ({} total):", sys.goals.len());
     for (goal, status) in sys.goals.iter() {
-        eprintln!("    {goal:?} solved={} looping={}", status.solved, status.looping);
+        eprintln!(
+            "    {goal:?} solved={} looping={}",
+            status.solved, status.looping
+        );
     }
 }
 
@@ -2511,7 +1793,9 @@ fn summarize(graph: &Graph, max_depth: usize) -> Summary {
     .collect();
     for n in &graph.nodes {
         graph_by_min_depth[n.depth as usize] += 1;
-        *status_counts.get_mut(n.status.name()).expect("every status is listed") += 1;
+        *status_counts
+            .get_mut(n.status.name())
+            .expect("every status is listed") += 1;
         if n.canon_err {
             *status_counts.get_mut("canon_err").expect("listed") += 1;
         }
@@ -2522,7 +1806,9 @@ fn summarize(graph: &Graph, max_depth: usize) -> Summary {
 
     let mut violations = Vec::new();
     if !(graph_size <= processed && u128::from(processed) <= tree) {
-        violations.push(format!("graph={graph_size} processed={processed} tree={tree}"));
+        violations.push(format!(
+            "graph={graph_size} processed={processed} tree={tree}"
+        ));
     }
     for (d, &p) in graph.processed_by_depth.iter().enumerate() {
         let t = tree_sizes.by_depth.get(d).copied().unwrap_or(0);
@@ -2557,7 +1843,10 @@ fn summarize(graph: &Graph, max_depth: usize) -> Summary {
 fn fingerprint_hex(fp: &CanonicalSystemFingerprint) -> String {
     let mut h = tamarin_utils::fingerprint::FingerprintHasher::new();
     h.tag(&format!("{fp:?}"));
-    h.finish()[..16].iter().map(|b| format!("{b:02x}")).collect()
+    h.finish()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn node_json(id: usize, n: &OrNode) -> Value {
@@ -2596,6 +1885,8 @@ struct Args {
     max_nodes: u64,
     out: Option<String>,
     no_merge: bool,
+    /// `--no-canon`: never canonicalize; implies `no_merge`.
+    no_canon: bool,
     /// `--top-methods N`: apply only the N best-ranked applicable candidate
     /// methods per node (default: all).
     top_methods: Option<usize>,
@@ -2623,7 +1914,7 @@ enum Mode {
 }
 
 const USAGE: &str = "usage: explore_canonical_matches <theory.spthy> <lemma> \
-     [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--top-methods N] \
+     [--max-depth N] [--max-nodes N] [--out PATH] [--no-merge] [--no-canon] [--top-methods N] \
      [--time-budget SECS] [--max-rss-gb GB] [--setup-timeout SECS] [--heartbeat SECS] \
      [--trace] [-D=FLAG ...] [--auto-sources]\n       \
      explore_canonical_matches --list-lemmas <theory.spthy> [-D=FLAG ...] [--auto-sources]";
@@ -2642,7 +1933,10 @@ fn take_load_opts(raw: &[String]) -> (Vec<String>, common::LoadOpts) {
     for a in raw {
         if a == "--auto-sources" {
             load.auto_sources = true;
-        } else if let Some(flag) = a.strip_prefix("-D=").or_else(|| a.strip_prefix("--defines=")) {
+        } else if let Some(flag) = a
+            .strip_prefix("-D=")
+            .or_else(|| a.strip_prefix("--defines="))
+        {
             load.defines.push(flag.to_string());
         } else if a == "-D" || a == "--defines" {
             usage_error("-D wants its flag attached: -D=FLAG");
@@ -2672,6 +1966,7 @@ fn parse_args(raw: &[String]) -> Mode {
         max_nodes: 2000,
         out: None,
         no_merge: false,
+        no_canon: false,
         top_methods: None,
         time_budget: None,
         max_rss_gb: None,
@@ -2700,6 +1995,10 @@ fn parse_args(raw: &[String]) -> Mode {
             "--setup-timeout" => args.setup_timeout = Some(number(value())),
             "--heartbeat" => args.heartbeat = Some(number(value())),
             "--no-merge" => args.no_merge = true,
+            "--no-canon" => {
+                args.no_canon = true;
+                args.no_merge = true;
+            }
             "--top-methods" => {
                 let n = number(value());
                 if n < 1.0 || n.fract() != 0.0 {
@@ -2710,7 +2009,11 @@ fn parse_args(raw: &[String]) -> Mode {
             "--trace" => args.trace = true,
             other => usage_error(&format!("unrecognized argument: {other}")),
         }
-        i += if matches!(flag, "--no-merge" | "--trace") { 1 } else { 2 };
+        i += if matches!(flag, "--no-merge" | "--no-canon" | "--trace") {
+            1
+        } else {
+            2
+        };
     }
     Mode::Explore(args)
 }
@@ -2771,9 +2074,9 @@ fn list_lemmas(theory_path: &str, load: &common::LoadOpts) -> i32 {
 /// for `--diff` mode: it only parses with the `diff` flag, or it has diff/
 /// equivalence lemmas -- the port has no diff-mode prover); `processes`
 /// (SAPIC); `rules`; and `lemmas`, exactly the names
-/// `build_lemma_proof_context` can look up -- after SAPIC and accountability
-/// translation, so accountability's generated lemmas are listed too. `rules`
-/// counts the translated rules.
+/// `ProverSession::context_and_system_for_lemma` can look up -- after SAPIC
+/// and accountability translation, so accountability's generated lemmas are
+/// listed too. `rules` counts the translated rules.
 fn describe_theory(path: &str, load: &common::LoadOpts, out: &mut Value) -> Result<(), String> {
     use tamarin_parser::ast::TheoryItem;
     use tamarin_theory::theory::TraceQuantifier;
@@ -2790,20 +2093,24 @@ fn describe_theory(path: &str, load: &common::LoadOpts, out: &mut Value) -> Resu
             .filter(|i| {
                 matches!(
                     i,
-                    TheoryItem::DiffLemma(_) | TheoryItem::EquivLemma(..) | TheoryItem::DiffEquivLemma(_)
+                    TheoryItem::DiffLemma(_)
+                        | TheoryItem::EquivLemma(..)
+                        | TheoryItem::DiffEquivLemma(_)
                 )
             })
             .count()
     });
     out["diff"] = json!(diff_items > 0 || (plain.is_err() && with_diff_flag.is_ok()));
     let parsed = plain.map_err(|e| format!("parse: {e}"))?;
-    out["processes"] = json!(parsed
-        .items
-        .iter()
-        .any(|i| matches!(i, TheoryItem::TopLevelProcess(_) | TheoryItem::ProcessDef(_))));
-    let translated = catch_unwind(AssertUnwindSafe(|| common::try_load_theory_translated(path, load)))
-        .map_err(|p| format!("load panicked: {}", panic_message(&*p)))??;
-    let elaborated = &translated.elaborated;
+    out["processes"] = json!(parsed.items.iter().any(|i| matches!(
+        i,
+        TheoryItem::TopLevelProcess(_) | TheoryItem::ProcessDef(_)
+    )));
+    let translated = catch_unwind(AssertUnwindSafe(|| {
+        common::try_load_theory_translated(path, load)
+    }))
+    .map_err(|p| format!("load panicked: {}", panic_message(&*p)))??;
+    let elaborated = &translated.theory;
     out["rules"] = json!(elaborated.rules().count());
     out["lemmas"] = elaborated
         .lemmas()
@@ -2815,55 +2122,32 @@ fn describe_theory(path: &str, load: &common::LoadOpts, out: &mut Value) -> Resu
                     TraceQuantifier::ExistsTrace => "exists-trace",
                 },
                 "attributes": l.attributes.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
-                "modulo": l.modulo,
             })
         })
         .collect();
     Ok(())
 }
 
-/// The user function-symbol guards the exploration must hold. Each restores
-/// the bundle that was installed before it on drop, so they must drop in
-/// reverse order of installation: fields drop in declaration order.
-struct UserFunsGuards {
-    _proof: tamarin_theory::elaborate::UserFunsForTheoryGuard,
-    _load: tamarin_theory::elaborate::UserFunsForTheoryGuard,
-}
-
 /// Loads the theory as `tamarin-rs --prove` does (`common::
 /// try_load_theory_for_proving`: SAPIC and accountability translation, the
-/// NDC-checked intruder cache, auto-sources) and builds the lemma's proof
-/// context -- the same per-lemma setup `prove_lemma` uses. Also returns
-/// whether the theory is a SAPIC one. Errors instead of panicking, so a
-/// batch log says which step failed.
-fn setup(args: &Args) -> Result<(ProofContext, System, UserFunsGuards, bool), String> {
+/// NDC-checked intruder cache, auto-sources, the prover session) and builds
+/// the lemma's proof context and initial system -- the per-lemma setup the
+/// prover's proof search starts from. Also returns whether the theory is a
+/// SAPIC one. Errors instead of panicking, so a batch log says which step
+/// failed.
+fn setup(args: &Args) -> Result<(ProverSession, ProofContext, System, bool), String> {
     let loaded = common::try_load_theory_for_proving(&args.theory_path, &args.load)?;
-    let common::Loaded { translated, maude, ndc_cache } = loaded;
-    let sapic = translated.elaborated.is_sapic;
     log!(
-        "loaded: {} rule(s) after translation, sapic={sapic}, auto_sources={}; maude started",
-        translated.elaborated.rules().count(),
-        translated.auto_sources
+        "loaded: {} rule(s) after translation, sapic={}, auto_sources={}; maude started",
+        loaded.translated_rules,
+        loaded.is_sapic,
+        loaded.auto_sources
     );
-    let (ctx, initial_sys, _skeleton_tree, proof_guard) = build_lemma_proof_context(
-        &translated.parsed,
-        &args.lemma,
-        maude,
-        None,
-        // The theory's path, as the CLI passes it: relative oracle paths
-        // (`heuristic: o "..."`) and the default `<theory>.oracle` resolve
-        // against its directory.
-        &args.theory_path,
-        &CliHeuristic::default(),
-        CutStrategy::Dfs,
-        Some(&ndc_cache),
-    )
-    .map_err(|e| format!("build_lemma_proof_context({}): {e:?}", args.lemma))?;
-    let guards = UserFunsGuards {
-        _proof: proof_guard,
-        _load: translated.user_funs_guard,
-    };
-    Ok((ctx, initial_sys, guards, sapic))
+    let (ctx, initial_sys) = loaded
+        .session
+        .context_and_system_for_lemma(&args.lemma)
+        .map_err(|e| format!("context_and_system_for_lemma({}): {e}", args.lemma))?;
+    Ok((loaded.session, ctx, initial_sys, loaded.is_sapic))
 }
 
 /// Writes `doc` to `out` via a temporary file and a rename, so a run killed
@@ -2894,7 +2178,7 @@ fn main() {
         common::maude_binary(),
         std::env::var("BLISS_PATH").ok()
     );
-    if !bliss_available() {
+    if !args.no_canon && !bliss_available() {
         eprintln!("bliss not available and TAM_ALLOW_NO_BLISS=1 set -- nothing to do, exiting");
         return;
     }
@@ -2908,9 +2192,10 @@ fn main() {
     if let Some(limit) = args.setup_timeout.filter(|&secs| secs > 0.0) {
         spawn_setup_watchdog(Duration::from_secs_f64(limit), Arc::clone(&setup_done));
     }
-    // `_user_funs_guard` must stay alive for the WHOLE exploration:
-    // canonicalization needs the installed signature.
-    let (ctx, initial_sys, _user_funs_guards, sapic) = match catch_unwind(AssertUnwindSafe(|| setup(&args))) {
+    // The session lives as long as the exploration, as the prover keeps its
+    // session while proving.
+    let (_session, ctx, initial_sys, sapic) = match catch_unwind(AssertUnwindSafe(|| setup(&args)))
+    {
         Ok(Ok(setup)) => setup,
         Ok(Err(e)) => {
             log!("setup failed: {e}");
@@ -2936,24 +2221,15 @@ fn main() {
             trace: args.trace,
             dump_formulas: env_gate!("DUMP_FORMULAS"),
             profile: env_gate!("PROFILE"),
-            profile_canon: env_gate!("PROFILE_CANON"),
-            dump_dummy_swaps: env_gate!("DUMP_DUMMY_SWAPS"),
             dump_canon_panic: env_gate!("DUMP_CANON_PANIC"),
-            dump_dimacs_at: std::env::var("DUMP_DIMACS_AT").ok().and_then(|v| v.parse().ok()).map(
-                |n| {
-                    let out = args
-                        .out
-                        .clone()
-                        .unwrap_or_else(|| default_out_path(&args.theory_path, &args.lemma));
-                    (n, out)
-                },
-            ),
-            dump_automorphisms: std::env::var("DUMP_AUTOMORPHISMS")
-                .map_or(0, |v| v.parse().unwrap_or(3)),
             dump_merges_into: std::env::var("DUMP_MERGES_INTO").ok().map(|v| {
                 let ids = v
                     .split(',')
-                    .map(|s| s.trim().parse().expect("DUMP_MERGES_INTO: comma-separated node ids"))
+                    .map(|s| {
+                        s.trim()
+                            .parse()
+                            .expect("DUMP_MERGES_INTO: comma-separated node ids")
+                    })
                     .collect();
                 let out = args
                     .out
@@ -2961,9 +2237,22 @@ fn main() {
                     .unwrap_or_else(|| default_out_path(&args.theory_path, &args.lemma));
                 (ids, out)
             }),
+            dump_term_graph_at: std::env::var("DUMP_TERM_GRAPH_AT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|n| {
+                    let out = args
+                        .out
+                        .clone()
+                        .unwrap_or_else(|| default_out_path(&args.theory_path, &args.lemma));
+                    (n, out)
+                }),
+            term_graph_check: std::env::var("TERM_GRAPH_CHECK").as_deref() != Ok("0"),
         },
+        canon_summary: CanonSummary::default(),
         max_depth: args.max_depth,
         no_merge: args.no_merge,
+        no_canon: args.no_canon,
         top_methods: args.top_methods,
         graph: Graph::default(),
         by_fingerprint: FastMap::default(),
@@ -2972,9 +2261,6 @@ fn main() {
         canonicalize_failures: 0,
         method_check: MethodCheck::default(),
         timers: StageTimers::default(),
-        canon_profile: CanonProfile::default(),
-        dummy_swap_examples_shown: 0,
-        automorphism_examples_shown: BTreeMap::new(),
         started: Instant::now(),
         time_budget: args.time_budget.map(Duration::from_secs_f64),
         max_rss_mib: args.max_rss_gb.map(|gb| (gb * 1024.0) as u64),
@@ -3021,6 +2307,7 @@ fn main() {
             "max_depth": args.max_depth,
             "max_nodes": args.max_nodes,
             "no_merge": args.no_merge,
+            "no_canon": args.no_canon,
             "top_methods": args.top_methods,
             "time_budget": args.time_budget,
             "max_rss_gb": args.max_rss_gb,
@@ -3038,7 +2325,6 @@ fn main() {
             "candidate_methods_secs": explorer.timers.candidate_methods.as_secs_f64(),
             "exec_proof_method_secs": explorer.timers.exec_proof_method.as_secs_f64(),
             "method_check_secs": explorer.timers.method_check.as_secs_f64(),
-            "profile_canon_secs": explorer.canon_profile.wall.as_secs_f64(),
         },
         "peak_rss_mib": peak_rss_mib,
         "sizes": summary.sizes,
@@ -3053,6 +2339,7 @@ fn main() {
             "failures": check.failures,
             "examples": check.examples,
         },
+        "canon": explorer.canon_summary.json(),
         "panic": explorer.panic,
         "invariant_violations": summary.violations,
         "methods": explorer.graph.methods,
@@ -3085,8 +2372,17 @@ fn main() {
         summary.lower_bound,
         args.max_depth,
         args.max_nodes,
-        if args.no_merge { ", no_merge" } else { "" }
+        if args.no_canon {
+            ", no_canon"
+        } else if args.no_merge {
+            ", no_merge"
+        } else {
+            ""
+        }
     );
+    if !args.no_canon {
+        println!("  canon: {}", explorer.canon_summary.line());
+    }
 
     if explorer.flags.profile {
         let t = &explorer.timers;
@@ -3100,24 +2396,34 @@ fn main() {
             summary.processed
         );
         for (label, d) in [
-            ("canonicalize_constraint_system (bliss+graph):", t.canonicalize),
+            (
+                "canonicalize_constraint_system (term graph):",
+                t.canonicalize,
+            ),
             ("fingerprint + dedup lookup:", t.fingerprint),
-            ("candidate_methods (ranking, incl. is_finished):", t.candidate_methods),
-            ("exec_proof_method (solving -- maude/AC here):", t.exec_proof_method),
-            ("merge check (methods of merged + signatures):", t.method_check),
+            (
+                "candidate_methods (ranking, incl. is_finished):",
+                t.candidate_methods,
+            ),
+            (
+                "exec_proof_method (solving -- maude/AC here):",
+                t.exec_proof_method,
+            ),
+            (
+                "merge check (methods of merged + signatures):",
+                t.method_check,
+            ),
         ] {
-            println!("  {label:<47}{:>8.2}s ({:>5.1}%)", d.as_secs_f64(), pct(d, total));
+            println!(
+                "  {label:<47}{:>8.2}s ({:>5.1}%)",
+                d.as_secs_f64(),
+                pct(d, total)
+            );
         }
         println!(
             "  sum of measured stages: {:.2}s (wall clock may exceed this by parse/elaborate/setup)",
             total.as_secs_f64()
         );
-    }
-
-    if explorer.flags.profile_canon {
-        explorer
-            .canon_profile
-            .print(explorer.flags.profile.then_some(explorer.timers.canonicalize));
     }
 
     let code = if stop == StopReason::Panic {

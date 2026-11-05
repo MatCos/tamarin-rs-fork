@@ -9,7 +9,10 @@
 //! are systems (with `TAM_RS_MERGE`, classes of canonically equal ones, which
 //! makes the tree a graph), AND nodes applied methods with their cases.
 //!
-//! ## One step
+//! ## One round
+//!
+//! A round runs up to `TAM_RS_MCGS_BATCH` traversals (B, default 1), one
+//! after another, and then expands the systems they end at together.
 //!
 //! 1. Traverse from the root. At an OR node take the method with the best
 //!    score `pb_c(N, N_a) · P(a) / Σ P`, where
@@ -23,15 +26,65 @@
 //! 2. A method not yet applied (a *virtual* one) is applied when picked. If
 //!    it does not apply it is dropped, its prior leaves the sum, and the
 //!    next pick is tried.
-//! 3. The traversal ends at a system not yet expanded, which is expanded:
-//!    rank its `candidate_methods`, compute their priors, and apply the
-//!    `TAM_RS_MCGS_TOP_N` with the best priors, in parallel. The others stay
-//!    virtual. Integrating stops once the system settles, like TamRL's
+//! 3. The traversal ends at a system not yet expanded and claims it. A later
+//!    traversal of the round never enters a claimed system, and the visits
+//!    the earlier ones counted already lead it elsewhere.
+//! 4. With merging, the claimed systems are keyed (see below).
+//! 5. The claimed systems are expanded in parallel: each ranks its
+//!    `candidate_methods`, computes their priors, and applies the
+//!    `TAM_RS_MCGS_TOP_N` with the best priors, in parallel too. The others
+//!    stay virtual. The expansions are integrated in the order their
+//!    traversals ran; integrating stops once a system settles, like TamRL's
 //!    expansion stops at the first closing method.
+//!
+//! With B = 1 a round is one traversal and one expansion. With a larger B a
+//! traversal sees the visits and claims of the round's earlier traversals,
+//! but not their expansions.
 //!
 //! Statuses need no backpropagation: [`search_graph::SearchGraph::propagate`]
 //! settles every ancestor at once. Visit counts are the only statistics,
 //! and they change only along the traversed path.
+//!
+//! ## Merging
+//!
+//! With `TAM_RS_MERGE`, a case is canonicalized when a traversal first
+//! enters it, not when its method is applied: an expansion applies up to
+//! `TAM_RS_MCGS_TOP_N` methods at once, and most of their cases are never
+//! entered. A case whose canonical form is an existing class's merges into
+//! that class ([`search_graph::SearchGraph::merge_into`]): its edge leads
+//! there, and the traversal goes on from there. Until a case is entered, its
+//! class is one system, so a case equal to a settled class or to a system on
+//! the path is found to be one only when entered.
+//!
+//! `TAM_RS_MCGS_KEYING=eager` restores the keying before just-in-time
+//! keying, for ablations: every case is canonicalized when its method is
+//! applied, in the worker that applies it, and a case whose canonical form
+//! is an existing class's merges into it right away, so its system is never
+//! stored. That costs a canonicalization for every case, entered or not, and
+//! saves the memory of the duplicates no traversal entered yet.
+//!
+//! `TAM_RS_MCGS_SHADOW_KEYS` measures merging without doing it: with merging
+//! off, a claimed system is canonicalized at the point just-in-time keying
+//! would key it, and a key seen before marks it a duplicate (`dup_of` in
+//! the graph dumps, `shadow_dups`); nothing merges, so the search is the
+//! unmerged one.
+//!
+//! A round keys its claimed systems in passes. A pass canonicalizes the
+//! claimed systems without a key in parallel, then decides for each, in
+//! traversal order, whether it is a new class or merges. Two claimed systems
+//! with one key are thus one class, expanded once: the second merges into
+//! the first, which is claimed, so its traversal ends. A traversal whose
+//! system merged into a class it may enter goes on from there and may claim
+//! another system, which the next pass keys.
+//!
+//! What merging saved shows in the `[search-stats]` lines as `expanded`,
+//! the classes the search expanded, against `unfolded`, their occurrences
+//! once the graph is unfolded into a tree ([`search_graph::unfold`]): what a
+//! search without merging would have to expand to reach the same systems
+//! along every path the graph has to them. It is not what the unmerged
+//! search expands, which makes other choices. Under eager keying the tree
+//! also has the cases merged when their method was applied that no
+//! traversal entered.
 //!
 //! ## Priors
 //!
@@ -62,16 +115,22 @@
 //! ## Output
 //!
 //! As in the top-N search, the settled graph is turned back into a
-//! [`ProofNode`] tree by [`Materializer`]. The search is deterministic: the
-//! eager methods of an expansion run in parallel, but their results are
-//! integrated in prior order.
+//! [`ProofNode`] tree by [`Materializer`]. The search is deterministic. The
+//! claimed systems of a round are keyed and expanded in parallel, and an
+//! expansion's eager methods run in parallel, but each task depends only on
+//! its own system (its maude handle's counter is seeded from it,
+//! [`WorkerEnv`]), and every result is integrated in a fixed order:
+//! traversal order, then prior order. So the outcome depends on B but not on
+//! the thread count or on timing, the deadline apart.
 //!
 //! ## Configuration
 //!
 //! Opt-in; with `TAM_RS_MCGS_BUDGET` unset the greedy driver runs unchanged.
 //! Read once per process ([`mcgs_from_env`]):
-//! - `TAM_RS_MCGS_BUDGET=S`: at most S steps per lemma, `0` for no limit
-//!   but the deadline; selects this search;
+//! - `TAM_RS_MCGS_BUDGET=S`: at most S traversals per lemma, `0` for no
+//!   limit but the deadline; selects this search;
+//! - `TAM_RS_MCGS_BATCH=B`: traversals per round, default 1, the sequential
+//!   search;
 //! - `TAM_RS_MCGS_TOP_N=N`: methods applied when a system is expanded,
 //!   default 50, `0` for all;
 //! - `TAM_RS_MCGS_TEMPERATURE=T`: default 1;
@@ -80,8 +139,26 @@
 //!   skips BM25;
 //! - `TAM_RS_MCGS_IDF_QUERY=formula+path|formula|path`: the BM25 query,
 //!   default `formula+path`;
+//! - `TAM_RS_MCGS_MAX_METHODS=K`: at most K methods per system, the first
+//!   K that apply in prior order, default `0` for no cap. With K = 1 the
+//!   search walks a single proof tree, the one the prior's first choices
+//!   make, and only chooses which case to descend into;
+//! - `TAM_RS_MCGS_CASE_ORDER=visits|first`: the case to descend into at an
+//!   AND node: the least visited (TamRL's uniform case prior, the default)
+//!   or the first open one in name order, which with K = 1 is a depth-first
+//!   walk of that tree;
 //! - `TAM_RS_MERGE` (presence): merge canonically equal systems (needs
 //!   `bliss`), shared with the top-N search;
+//! - `TAM_RS_MCGS_KEYING=jit|eager`: with merging, canonicalize a case when
+//!   a traversal first enters it (the default) or when its method is applied
+//!   (see "Merging");
+//! - `TAM_RS_MCGS_SHADOW_KEYS` (presence): without merging, canonicalize
+//!   claimed systems and count the duplicates, without merging them;
+//! - `TAM_RS_CANON_INVARIANT=off|on|check`: how merging and shadow keys
+//!   canonicalize ([`super::canon_table`]): only a system whose cheap
+//!   invariant another system has (`on`, the default), every system (`off`),
+//!   or every system, checked against its invariant (`check`); the decisions
+//!   are the same;
 //! - `TAM_RS_MCGS_STATS` (presence): one summary line per search on stderr.
 //! - `TAM_RS_SEARCH_STATS=SECS`: `[search-stats]` lines on stderr, the merge
 //!   counters both graph searches share in one format: one every SECS
@@ -94,16 +171,21 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use crate::canon_term_graph::system_to_term;
 use crate::constraint::solver::bm25;
+use crate::constraint::solver::canon_table::{canon_mode_from_env, CanonicalTable, Prepared};
 use crate::constraint::solver::context::ProofContext;
 use crate::constraint::solver::proof_method::ProofMethod;
 use crate::constraint::solver::reduction::avoid_fresh_state;
 use crate::constraint::solver::search::{self, candidate_methods, ProofNode};
 use crate::constraint::solver::search_graph::{
-    self, apply_method, classify, Applied, Child, ClassId, End, Interned, Materializer,
-    MergeCounts, StatsReporter, Status, Stored, WorkStats, WorkerEnv, DEPTH_CAP, ROOT,
+    self, apply_method, classify, kept_system, Applied, Child, ClassId, End, Interned, KeptSystems,
+    Materializer, MergeCounts, StatsReporter, Status, Stored, WorkStats, WorkerEnv, DEPTH_CAP,
+    ROOT,
 };
 use crate::constraint::system::System;
+use crate::prove::ProveError;
+use tamarin_utils::FastMap;
 
 // =============================================================================
 // Configuration
@@ -129,11 +211,31 @@ impl IdfQuery {
     }
 }
 
+/// Which open case of an applied method a traversal descends into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseOrder {
+    /// The least visited: TamRL's uniform prior over the cases.
+    Visits,
+    /// The first in name order.
+    First,
+}
+
+/// When a case is canonicalized, with merging on (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keying {
+    /// When a traversal first enters it.
+    Jit,
+    /// When its method is applied.
+    Eager,
+}
+
 /// The MCGS search's settings, stamped onto each lemma's `ProofContext`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct McgsConfig {
-    /// At most this many steps; `0` for no limit but the deadline.
+    /// At most this many traversals; `0` for no limit but the deadline.
     pub budget: u64,
+    /// Traversals per round, whose systems are keyed and expanded together.
+    pub batch: usize,
     /// Methods applied when a system is expanded, best prior first; `0` for
     /// all.
     pub top_n: u32,
@@ -144,21 +246,39 @@ pub struct McgsConfig {
     /// skips BM25.
     pub idf_weight: f64,
     pub idf_query: IdfQuery,
+    /// At most this many methods per class, the first that apply in prior
+    /// order; `0` for no cap.
+    pub max_methods: u32,
+    pub case_order: CaseOrder,
     /// Merge canonically equal systems into one class.
     pub merge: bool,
+    /// With merging: when a case is canonicalized.
+    pub keying: Keying,
+    /// Without merging: canonicalize claimed systems and count duplicates.
+    pub shadow_keys: bool,
 }
 
 impl McgsConfig {
+    /// Whether cases are canonicalized when their method is applied.
+    fn key_cases(&self) -> bool {
+        self.merge && self.keying == Keying::Eager
+    }
+
     /// The defaults, with `budget` steps.
     pub fn with_budget(budget: u64) -> Self {
         McgsConfig {
             budget,
+            batch: 1,
             top_n: 50,
             temperature: 1.0,
             heuristic_weight: 0.3,
             idf_weight: 1.0,
             idf_query: IdfQuery::FormulaPath,
+            max_methods: 0,
+            case_order: CaseOrder::Visits,
             merge: false,
+            keying: Keying::Jit,
+            shadow_keys: false,
         }
     }
 }
@@ -181,6 +301,11 @@ pub fn mcgs_from_env() -> Option<McgsConfig> {
         std::env::var_os("TAM_RS_MCGS_BUDGET")?;
         let defaults = McgsConfig::with_budget(0);
         let budget = env_value("TAM_RS_MCGS_BUDGET", 0u64, "a non-negative integer");
+        let batch = env_value("TAM_RS_MCGS_BATCH", defaults.batch, "a positive integer");
+        assert!(
+            batch >= 1,
+            "TAM_RS_MCGS_BATCH=0: expected a positive integer"
+        );
         let top_n = env_value(
             "TAM_RS_MCGS_TOP_N",
             defaults.top_n,
@@ -209,14 +334,34 @@ pub fn mcgs_from_env() -> Option<McgsConfig> {
                 "TAM_RS_MCGS_IDF_QUERY={other:?}: expected `formula+path`, `formula` or `path`"
             ),
         };
+        let max_methods = env_value(
+            "TAM_RS_MCGS_MAX_METHODS",
+            defaults.max_methods,
+            "a non-negative integer",
+        );
+        let case_order = match std::env::var("TAM_RS_MCGS_CASE_ORDER").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("visits") => CaseOrder::Visits,
+            Ok("first") => CaseOrder::First,
+            other => panic!("TAM_RS_MCGS_CASE_ORDER={other:?}: expected `visits` or `first`"),
+        };
+        let keying = match std::env::var("TAM_RS_MCGS_KEYING").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("jit") => Keying::Jit,
+            Ok("eager") => Keying::Eager,
+            other => panic!("TAM_RS_MCGS_KEYING={other:?}: expected `jit` or `eager`"),
+        };
         Some(McgsConfig {
             budget,
+            batch,
             top_n,
             temperature,
             heuristic_weight,
             idf_weight,
             idf_query,
+            max_methods,
+            case_order,
             merge: tamarin_utils::env_gate!("TAM_RS_MERGE"),
+            keying,
+            shadow_keys: tamarin_utils::env_gate!("TAM_RS_MCGS_SHADOW_KEYS"),
         })
     })
 }
@@ -229,11 +374,15 @@ pub fn config_for_lemma() -> Option<McgsConfig> {
         super::topn_search::top_n_from_env().is_none(),
         "TAM_RS_MCGS_BUDGET and TAM_RS_TOP_METHODS select two different searches; set one"
     );
-    if config.merge {
+    assert!(
+        !(config.merge && config.shadow_keys),
+        "TAM_RS_MCGS_SHADOW_KEYS measures the search without merging; unset TAM_RS_MERGE"
+    );
+    if config.merge || config.shadow_keys {
         // Panics itself, with install hints, unless TAM_ALLOW_NO_BLISS=1.
         assert!(
             crate::bliss_proc::bliss_available(),
-            "TAM_RS_MERGE needs a working `bliss` executable"
+            "TAM_RS_MERGE and TAM_RS_MCGS_SHADOW_KEYS need a working `bliss` executable"
         );
     }
     Some(config)
@@ -287,6 +436,22 @@ struct McgsExt {
     path_len: u32,
     /// Open, but nothing to expand is reachable from it any more.
     dead: bool,
+    /// [`McgsConfig::max_methods`]: no method is applied beyond this many.
+    max_methods: u32,
+    /// The class this case merged into when a traversal entered it: it has
+    /// no edge since.
+    merged_into: Option<ClassId>,
+    /// Claimed by a traversal of the current round, which expands it.
+    in_flight: bool,
+    /// Per applied method, per case: the case merged into an open class
+    /// when the method was applied (eager keying), and no traversal has
+    /// gone through it yet.
+    pending_merge: Vec<Vec<bool>>,
+    /// CPU seconds spent applying the class's methods: what expanding it
+    /// cost, eager keying's canonicalizations included.
+    expand_s: f64,
+    /// With shadow keys: the earlier claimed class with the same key.
+    dup_of: Option<ClassId>,
 }
 
 impl McgsExt {
@@ -304,8 +469,54 @@ impl McgsExt {
             .sum()
     }
 
+    /// Whether a virtual method may still be applied.
     fn has_virtual(&self) -> bool {
-        self.actions.iter().any(|a| a.state == ActionState::Virtual)
+        !self.capped() && self.actions.iter().any(|a| a.state == ActionState::Virtual)
+    }
+
+    /// The class has as many methods as [`McgsConfig::max_methods`] allows.
+    fn capped(&self) -> bool {
+        self.max_methods > 0 && self.and_rank.len() >= self.max_methods as usize
+    }
+}
+
+impl search_graph::DumpExt for McgsExt {
+    fn class_fields(&self, row: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::json;
+        row.insert("expanded".into(), json!(self.expanded));
+        row.insert("dead".into(), json!(self.dead));
+        row.insert("merged_into".into(), json!(self.merged_into));
+        row.insert("expand_s".into(), json!(self.expand_s));
+        row.insert("dup_of".into(), json!(self.dup_of));
+        row.insert("visits".into(), json!(self.visits()));
+        row.insert("path_len".into(), json!(self.path_len));
+        // Per candidate, in the heuristic's order: its prior, and `V`
+        // (virtual), `N` (does not apply) or the index of its applied method.
+        row.insert(
+            "priors".into(),
+            json!(self.actions.iter().map(|a| a.prior).collect::<Vec<_>>()),
+        );
+        row.insert(
+            "states".into(),
+            json!(self
+                .actions
+                .iter()
+                .map(|a| match a.state {
+                    ActionState::Virtual => "V".to_string(),
+                    ActionState::NotApplicable => "N".to_string(),
+                    ActionState::Applied(i) => i.to_string(),
+                })
+                .collect::<Vec<_>>()),
+        );
+    }
+
+    fn and_fields(&self, a: usize, row: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::json;
+        let rank = self.and_rank[a];
+        row.insert("rank".into(), json!(rank));
+        row.insert("prior".into(), json!(self.actions[rank].prior));
+        row.insert("visits".into(), json!(self.and_visits[a]));
+        row.insert("case_visits".into(), json!(self.case_visits[a]));
     }
 }
 
@@ -320,7 +531,8 @@ fn score(parent_visits: u32, visits: u32, prior: f64, prior_sum: f64) -> f64 {
 }
 
 /// A class no traversal should enter: settled, dead, closed without an open
-/// method that has cases, or already on the path.
+/// method that has cases, already on the path, or claimed by another
+/// traversal of the round.
 fn enterable(g: &SearchGraph, d: ClassId, on_path: &[ClassId]) -> bool {
     let class = g.class(d);
     let stuck = class.closed
@@ -328,7 +540,11 @@ fn enterable(g: &SearchGraph, d: ClassId, on_path: &[ClassId]) -> bool {
             .ands
             .iter()
             .any(|and| and.status == Status::Open && !and.cases.is_empty());
-    class.status == Status::Open && !class.ext.dead && !stuck && !on_path.contains(&d)
+    class.status == Status::Open
+        && !class.ext.dead
+        && !class.ext.in_flight
+        && !stuck
+        && !on_path.contains(&d)
 }
 
 fn method_selectable(g: &SearchGraph, c: ClassId, a: usize, on_path: &[ClassId]) -> bool {
@@ -361,7 +577,12 @@ fn ranked_picks(g: &SearchGraph, c: ClassId, on_path: &[ClassId]) -> Vec<Pick> {
             ));
         }
     }
-    for i in by_prior(&ext.actions, |a| a.state == ActionState::Virtual) {
+    let virtuals = if ext.capped() {
+        Vec::new()
+    } else {
+        by_prior(&ext.actions, |a| a.state == ActionState::Virtual)
+    };
+    for i in virtuals {
         scored.push((
             score(visits, 0, ext.actions[i].prior, sum),
             Pick::Virtual(i),
@@ -380,12 +601,25 @@ fn by_prior(actions: &[Action], keep: impl Fn(&Action) -> bool) -> Vec<usize> {
     ranks
 }
 
-/// The case to descend into below method `a` of `c`: the best score under
-/// the uniform prior, which is the least visited enterable case, the first
-/// in name order among equals.
-fn pick_case(g: &SearchGraph, c: ClassId, a: u16, on_path: &[ClassId]) -> Option<usize> {
+/// The case to descend into below method `a` of `c`: with
+/// [`CaseOrder::Visits`] the best score under the uniform prior, which is the
+/// least visited enterable case, the first in name order among equals; with
+/// [`CaseOrder::First`] the first enterable case.
+fn pick_case(
+    g: &SearchGraph,
+    c: ClassId,
+    a: u16,
+    on_path: &[ClassId],
+    order: CaseOrder,
+) -> Option<usize> {
     let class = g.class(c);
     let and = &class.ands[a as usize];
+    if order == CaseOrder::First {
+        return and
+            .cases
+            .iter()
+            .position(|&(_, d)| enterable(g, d, on_path));
+    }
     let visits = &class.ext.case_visits[a as usize];
     let total: u32 = visits.iter().sum();
     let prior = 1.0 / and.cases.len() as f64;
@@ -395,7 +629,7 @@ fn pick_case(g: &SearchGraph, c: ClassId, a: u16, on_path: &[ClassId]) -> Option
             continue;
         }
         let s = score(total, visits[k], prior, 1.0);
-        if best.map_or(true, |(b, _)| s > b) {
+        if best.is_none_or(|(b, _)| s > b) {
             best = Some((s, k));
         }
     }
@@ -422,12 +656,75 @@ fn priors(config: &McgsConfig, docs: &[Vec<String>], n: usize, query: &[String])
         .collect()
 }
 
+/// The priors the search gives `ranked`, the candidates of `sys` in the
+/// heuristic's order, when it expands `sys` reached along `path`: each
+/// method applied on the way down with the system it was applied to. Lets
+/// the proof profiler (`examples/profile_reference_proof.rs`) compare a
+/// proof's choices with what this search would prefer at the same system.
+pub fn candidate_priors(
+    config: &McgsConfig,
+    lemma_text: &str,
+    sys: &System,
+    ranked: &[ProofMethod],
+    path: &[(&ProofMethod, &System)],
+) -> Vec<f64> {
+    let (docs, query) = bm25_inputs(config, lemma_text, sys, ranked, path);
+    priors(config, &docs, ranked.len(), &query)
+}
+
+/// The BM25 bias of [`candidate_priors`] at weight 1: the z-normalized BM25
+/// scores of `ranked` against the query, which the prior scales by
+/// `idf_weight` and adds to the rank bias. Lets a caller recompute the prior
+/// for other weights and temperatures.
+pub fn candidate_bm25_z(
+    config: &McgsConfig,
+    lemma_text: &str,
+    sys: &System,
+    ranked: &[ProofMethod],
+    path: &[(&ProofMethod, &System)],
+) -> Vec<f64> {
+    let config = McgsConfig {
+        idf_weight: 1.0,
+        ..*config
+    };
+    let (docs, query) = bm25_inputs(&config, lemma_text, sys, ranked, path);
+    bm25::z_bias(&bm25::bm25_plus_scores(&docs, &query), 1.0)
+}
+
+/// The candidates' BM25 documents and the query, as the search builds them.
+fn bm25_inputs(
+    config: &McgsConfig,
+    lemma_text: &str,
+    sys: &System,
+    ranked: &[ProofMethod],
+    path: &[(&ProofMethod, &System)],
+) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut docs = Vec::new();
+    let mut query = Vec::new();
+    if config.idf_weight != 0.0 {
+        docs = ranked
+            .iter()
+            .map(|m| bm25::tokens(&bm25::method_text(m, sys)))
+            .collect();
+        if config.idf_query.path() {
+            for (m, s) in path {
+                query.extend(bm25::tokens(&bm25::method_text(m, s)));
+            }
+        }
+        if config.idf_query.formula() {
+            query.extend(bm25::lemma_query(lemma_text));
+        }
+    }
+    (docs, query)
+}
+
 // =============================================================================
 // The engine
 // =============================================================================
 
 #[derive(Debug, Default)]
 struct Stats {
+    /// Traversals.
     steps: u64,
     expansions: u64,
     materializations: u64,
@@ -435,8 +732,14 @@ struct Stats {
     applied: u64,
     leaves: u64,
     merges: u64,
+    /// See [`MergeCounts`].
+    merges_used: u64,
+    merges_settled: u64,
+    merges_on_path: u64,
+    shadow_dups: u64,
+    key_wall: Duration,
     repaths: u64,
-    /// Steps that neither expanded nor applied anything.
+    /// Traversals that neither claimed a system nor applied anything.
     idle_steps: u64,
     work: WorkStats,
 }
@@ -449,17 +752,79 @@ enum Materialized {
     Aborted,
 }
 
+/// One traversal of a round.
+struct Traversal {
+    /// The edges taken: a class and its method.
+    path: Vec<(ClassId, u16)>,
+    /// The classes entered, the root first.
+    on_path: Vec<ClassId>,
+    end: TraversalEnd,
+    /// It claimed a system or applied a method.
+    progress: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraversalEnd {
+    /// The unexpanded class it claimed.
+    Leaf(ClassId),
+    /// Nothing left to pick along its path.
+    Done,
+}
+
+impl Traversal {
+    fn from_root() -> Self {
+        Traversal {
+            path: Vec::new(),
+            on_path: vec![ROOT],
+            end: TraversalEnd::Done,
+            progress: false,
+        }
+    }
+}
+
+/// What expanding a claimed class takes from the graph.
+struct LeafTask {
+    c: ClassId,
+    stored: Stored,
+    depth: u32,
+    cut: bool,
+    /// The BM25 query of the path that reached it.
+    query: Vec<String>,
+    path_len: u32,
+}
+
+/// A claimed class's expansion, as a worker computed it.
+struct Expansion {
+    c: ClassId,
+    /// The class's system, until it goes back to the store.
+    stored: Option<Stored>,
+    path_len: u32,
+    ranked: Vec<ProofMethod>,
+    docs: Vec<Vec<String>>,
+    actions: Vec<Action>,
+    /// Per eager method, best prior first: its rank and how applying it went.
+    results: Vec<(usize, Result<Option<Applied>, ProveError>, WorkStats)>,
+}
+
 struct Engine<'a> {
     ctx: &'a ProofContext,
     config: McgsConfig,
     graph: SearchGraph,
     /// Indexed by class: its system while it may still get a method.
     store: Vec<Option<Stored>>,
+    /// The systems of pending classes of a canonical table that the store
+    /// dropped: the table needs them to canonicalize a representative.
+    retained: FastMap<ClassId, Box<System>>,
     /// `--bound`: no class at this depth or deeper is expanded.
     bound: u32,
     deadline: Instant,
     /// The lemma's BM25 query tokens.
     formula_query: Vec<String>,
+    /// With merging: the classes' canonical keys.
+    table: CanonicalTable,
+    /// With shadow keys: the key of each claimed system, and the first class
+    /// that had it.
+    shadow: CanonicalTable,
     stats: Stats,
     reporter: StatsReporter,
 }
@@ -476,27 +841,65 @@ impl<'a> Engine<'a> {
             config,
             graph: SearchGraph::new(),
             store: Vec::new(),
+            retained: FastMap::default(),
             bound,
             deadline,
             formula_query,
+            table: CanonicalTable::new(canon_mode_from_env()),
+            shadow: CanonicalTable::new(canon_mode_from_env()),
             stats: Stats::default(),
             reporter: StatsReporter::new("mcgs"),
         }
     }
 
     fn merge_counts(&self) -> MergeCounts {
+        let (stored, stored_unkeyed) =
+            search_graph::stored_counts(&self.graph, &self.store, self.config.merge);
         MergeCounts {
             applied: self.stats.applied,
             leaves: self.stats.leaves,
             merges: self.stats.merges,
+            merges_used: self.stats.merges_used,
+            merges_settled: self.stats.merges_settled,
+            merges_on_path: self.stats.merges_on_path,
+            shadow_dups: self.stats.shadow_dups,
+            stored,
+            stored_unkeyed,
+            key_wall: self.stats.key_wall,
+            unfolding: Some(search_graph::unfold(&self.graph, |class| {
+                class.ext.expanded
+            })),
+            retained: self.retained.len() as u64,
+            ..MergeCounts::default()
+        }
+        .with_table(if self.config.shadow_keys {
+            &self.shadow
+        } else {
+            &self.table
+        })
+    }
+
+    /// How methods applied now key their cases and themselves.
+    fn keying(&self) -> MethodKeying<'_> {
+        MethodKeying {
+            cases_for: self.config.key_cases().then_some(&self.table),
+            merge: self.config.merge,
         }
     }
 
     /// A `[search-stats]` progress line, if one is due.
     fn report_progress(&mut self) {
+        if !self.reporter.due() {
+            return;
+        }
         let counts = self.merge_counts();
-        self.reporter
-            .tick(&self.ctx.lemma_name, &self.graph, &counts, &self.stats.work);
+        self.reporter.tick(
+            &self.ctx.lemma_name,
+            &self.graph,
+            &self.table,
+            &counts,
+            &self.stats.work,
+        );
     }
 
     fn add_root(&mut self, sys: System) {
@@ -504,7 +907,12 @@ impl<'a> Engine<'a> {
         let child = if self.bound == 0 {
             Child::Cut
         } else {
-            classify(self.ctx, sys, self.config.merge, &mut work)
+            classify(
+                self.ctx,
+                sys,
+                self.config.merge.then_some(&self.table),
+                &mut work,
+            )
         };
         self.stats.work.add(&work);
         let root = self.intern(child, 0);
@@ -513,7 +921,15 @@ impl<'a> Engine<'a> {
 
     /// The class of a prepared case reached at `depth`.
     fn intern(&mut self, child: Child, depth: u32) -> ClassId {
-        let (c, interned) = self.graph.intern(child, depth);
+        self.intern_case(child, depth).0
+    }
+
+    /// [`Self::intern`], and whether the case merged into an existing class,
+    /// which only an eagerly keyed case does.
+    fn intern_case(&mut self, child: Child, depth: u32) -> (ClassId, bool) {
+        let (c, interned) = self
+            .graph
+            .intern(child, depth, &mut self.table, &mut self.stats.work);
         let stored = match interned {
             Interned::Cut => {
                 self.graph.class_mut(c).ext.dead = true;
@@ -524,16 +940,169 @@ impl<'a> Engine<'a> {
                 None
             }
             Interned::New(stored) => Some(stored),
-            Interned::Merged => {
+            Interned::Merged if self.config.key_cases() => {
                 self.stats.merges += 1;
                 let class = self.graph.class_mut(c);
                 class.min_depth = class.min_depth.min(depth);
-                return c;
+                return (c, true);
             }
+            Interned::Merged => unreachable!(
+                "MCGS keys a case when a traversal enters it; only the root, the first \
+                 class, is keyed when created"
+            ),
         };
         assert_eq!(self.store.len(), c as usize, "classes are stored in order");
         self.store.push(stored);
-        c
+        (c, false)
+    }
+
+    /// Places `c`, a claimed class without a key, in the canonical table by
+    /// its system `stored`, `prepared` for it. If no class is canonically
+    /// equal, `c` is a class of its own, and keeps the labelling for its
+    /// methods if the table gave one. Otherwise `c` merges into that class,
+    /// which is returned.
+    fn settle_key(
+        &mut self,
+        c: ClassId,
+        mut stored: Stored,
+        prepared: Prepared,
+    ) -> Option<ClassId> {
+        let placed = self.table.intern(prepared, || c, &mut self.stats.work);
+        if !placed.merged {
+            self.graph.mark_keyed(c);
+            stored.labelling = placed.labelling;
+            self.store[c as usize] = Some(stored);
+            return None;
+        }
+        let existing = placed.class;
+        let ext = &mut self.graph.class_mut(c).ext;
+        ext.in_flight = false;
+        ext.merged_into = Some(existing);
+        self.graph.merge_into(c, existing);
+        self.stats.merges += 1;
+        self.stats.merges_used += 1;
+        if self.graph.class(existing).status != Status::Open {
+            self.stats.merges_settled += 1;
+        }
+        Some(existing)
+    }
+
+    /// Keys the systems the round's traversals claimed, with merging on (see
+    /// the module docs), in passes: each prepares the claimed systems without
+    /// a key for the canonical table in parallel, then places them in
+    /// traversal order. A traversal whose system merged goes on from the class it
+    /// merged into, if it may enter it, and may claim another system, which
+    /// the next pass keys. Each pass merges or keys every system it takes,
+    /// and none creates a class, so the passes end.
+    fn key_leaves(&mut self, env: &WorkerEnv, ts: &mut [Traversal]) -> Result<(), ProveError> {
+        if !self.config.merge {
+            if self.config.shadow_keys {
+                self.shadow_key_leaves(ts);
+            }
+            return Ok(());
+        }
+        loop {
+            let unkeyed: Vec<(usize, ClassId)> = ts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| match t.end {
+                    TraversalEnd::Leaf(c) if !self.graph.class(c).keyed => Some((i, c)),
+                    _ => None,
+                })
+                .collect();
+            if unkeyed.is_empty() {
+                return Ok(());
+            }
+            // A `System` may move between threads but not be shared: each
+            // task takes its claimed system out of the store.
+            let owned: Vec<Stored> = unkeyed
+                .iter()
+                .map(|&(_, c)| {
+                    self.store[c as usize]
+                        .take()
+                        .expect("a claimed class keeps its system")
+                })
+                .collect();
+            let pass = Instant::now();
+            let table = &self.table;
+            let mut prepared = map_in_order(owned, |stored| {
+                let start = Instant::now();
+                let mut work = WorkStats::default();
+                let prepared = table.prepare(&stored.sys, &mut work);
+                work.busy = start.elapsed();
+                (stored, prepared, work)
+            });
+            self.table.precompute(
+                prepared.iter_mut().map(|(_, prepared, _)| prepared),
+                |r| kept_system(&self.store, &self.retained, r).map(system_to_term),
+                &mut self.stats.work,
+            );
+            self.stats.key_wall += pass.elapsed();
+            let mut merged = Vec::new();
+            for (&(i, c), (stored, prepared, work)) in unkeyed.iter().zip(prepared) {
+                self.stats.work.add(&work);
+                if let Some(existing) = self.settle_key(c, stored, prepared) {
+                    merged.push((i, existing));
+                }
+            }
+            self.forget_keyed();
+            for (i, existing) in merged {
+                let t = &mut ts[i];
+                t.on_path.pop();
+                t.end = TraversalEnd::Done;
+                if t.on_path.contains(&existing) {
+                    self.stats.merges_on_path += 1;
+                }
+                if enterable(&self.graph, existing, &t.on_path) {
+                    t.on_path.push(existing);
+                    self.select_from(env, t)?;
+                }
+            }
+        }
+    }
+
+    /// Shadow keys: canonicalizes the round's claimed systems, in parallel,
+    /// and marks each whose key an earlier claimed system had as its
+    /// duplicate. Nothing merges, and every system goes back to its class.
+    fn shadow_key_leaves(&mut self, ts: &[Traversal]) {
+        let claimed: Vec<ClassId> = ts
+            .iter()
+            .filter_map(|t| match t.end {
+                TraversalEnd::Leaf(c) => Some(c),
+                TraversalEnd::Done => None,
+            })
+            .collect();
+        let owned: Vec<Stored> = claimed
+            .iter()
+            .map(|&c| {
+                self.store[c as usize]
+                    .take()
+                    .expect("a claimed class keeps its system")
+            })
+            .collect();
+        let pass = Instant::now();
+        let shadow = &self.shadow;
+        let mut prepared = map_in_order(owned, |stored| {
+            let mut work = WorkStats::default();
+            let prepared = shadow.prepare(&stored.sys, &mut work);
+            (stored, prepared, work)
+        });
+        self.shadow.precompute(
+            prepared.iter_mut().map(|(_, prepared, _)| prepared),
+            |r| kept_system(&self.store, &self.retained, r).map(system_to_term),
+            &mut self.stats.work,
+        );
+        self.stats.key_wall += pass.elapsed();
+        for (c, (stored, prepared, work)) in claimed.into_iter().zip(prepared) {
+            self.stats.work.add(&work);
+            self.store[c as usize] = Some(stored);
+            let placed = self.shadow.intern(prepared, || c, &mut self.stats.work);
+            if placed.merged {
+                self.graph.class_mut(c).ext.dup_of = Some(placed.class);
+                self.stats.shadow_dups += 1;
+            }
+        }
+        self.forget_keyed();
     }
 
     /// The BM25 query for a system reached along `path`.
@@ -563,11 +1132,11 @@ impl<'a> Engine<'a> {
     fn integrate(&mut self, c: ClassId, rank: usize, applied: Applied) -> u16 {
         let Applied {
             method,
-            method_fp,
+            method_key,
             cases,
         } = applied;
         self.stats.applied += 1;
-        let a = self.graph.add_and(c, method, method_fp);
+        let a = self.graph.add_and(c, method, method_key);
         let ext = &mut self.graph.class_mut(c).ext;
         assert_eq!(
             ext.and_rank.len(),
@@ -579,10 +1148,21 @@ impl<'a> Engine<'a> {
         ext.and_visits.push(0);
         ext.case_visits.push(vec![0; cases.len()]);
         let depth = self.graph.class(c).min_depth + 1;
+        let mut pending = Vec::with_capacity(cases.len());
         for (name, child) in cases {
-            let d = self.intern(child, depth);
+            let (d, merged) = self.intern_case(child, depth);
+            // A merge into a settled class takes effect now: the case is
+            // closed. One into an open class is used once a traversal goes
+            // through it.
+            let settled = merged && self.graph.class(d).status != Status::Open;
+            if settled {
+                self.stats.merges_used += 1;
+                self.stats.merges_settled += 1;
+            }
+            pending.push(merged && !settled);
             self.graph.add_case(c, a, name, d);
         }
+        self.graph.class_mut(c).ext.pending_merge.push(pending);
         self.graph.propagate(vec![(c, a)]);
         a
     }
@@ -598,92 +1178,119 @@ impl<'a> Engine<'a> {
     fn tidy(&mut self, c: ClassId) {
         let class = self.graph.class(c);
         if class.status != Status::Open {
-            self.store[c as usize] = None;
+            self.release(c);
         } else if !class.ext.has_virtual() && !class.closed {
-            self.store[c as usize] = None;
+            self.release(c);
             self.graph.close(c);
         }
     }
 
-    /// Ranks `c`'s candidates, computes their priors from `path`, and
-    /// applies the best `top_n` concurrently.
-    fn expand(&mut self, env: &WorkerEnv, c: ClassId, path: &[(ClassId, u16)]) {
-        self.stats.expansions += 1;
-        let depth = self.graph.class(c).min_depth;
-        let cut = self.cut_children(c);
-        let merge = self.config.merge;
-        let use_bm25 = self.config.idf_weight != 0.0;
-        let stored = self.store[c as usize]
-            .as_ref()
-            .expect("an unexpanded open class keeps its system");
-        let (ranked, docs) = env.run(self.ctx, avoid_fresh_state(&stored.sys), |worker_ctx| {
-            let ranked = candidate_methods(&stored.sys, worker_ctx, depth as usize);
-            let docs: Vec<Vec<String>> = if use_bm25 {
-                ranked
-                    .iter()
-                    .map(|m| bm25::tokens(&bm25::method_text(m, &stored.sys)))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (ranked, docs)
-        });
-        let priors = priors(&self.config, &docs, ranked.len(), &self.query(path));
-        let actions: Vec<Action> = priors
-            .into_iter()
-            .map(|prior| Action {
-                prior,
-                state: ActionState::Virtual,
-            })
-            .collect();
-        let mut eager = by_prior(&actions, |_| true);
-        if self.config.top_n > 0 {
-            eager.truncate(self.config.top_n as usize);
+    /// Drops `c`'s system from the store: the class needs it no more. The
+    /// system of a pending class of a canonical table is set aside, to
+    /// canonicalize the class's representative when a system with its
+    /// invariant comes.
+    fn release(&mut self, c: ClassId) {
+        let pending = self.table.is_pending(c) || self.shadow.is_pending(c);
+        if let Some(stored) = self.store[c as usize].take().filter(|_| pending) {
+            self.retained.insert(c, stored.sys);
         }
-        let tasks: Vec<(usize, ProofMethod)> =
-            eager.iter().map(|&i| (i, ranked[i].clone())).collect();
+    }
+
+    /// Drops the set-aside systems of the classes the canonical tables keyed
+    /// since: they need them no more.
+    fn forget_keyed(&mut self) {
+        for c in self
+            .table
+            .take_keyed()
+            .into_iter()
+            .chain(self.shadow.take_keyed())
+        {
+            self.retained.remove(&c);
+        }
+    }
+
+    /// Expands the classes the round's traversals claimed, concurrently (see
+    /// [`expand_leaf`]), and integrates them in traversal order. Fails with
+    /// the first error in that order, whichever worker meets one first.
+    fn expand_leaves(&mut self, env: &WorkerEnv, ts: &[Traversal]) -> Result<(), ProveError> {
+        let mut tasks = Vec::new();
+        for t in ts {
+            let TraversalEnd::Leaf(c) = t.end else {
+                continue;
+            };
+            assert!(
+                !self.config.merge || self.graph.class(c).keyed,
+                "class #{c} is expanded unkeyed: merging places a class before its methods"
+            );
+            tasks.push(LeafTask {
+                c,
+                stored: self.store[c as usize]
+                    .take()
+                    .expect("a claimed class keeps its system"),
+                depth: self.graph.class(c).min_depth,
+                cut: self.cut_children(c),
+                query: self.query(&t.path),
+                path_len: t.path.len() as u32,
+            });
+        }
+        let (ctx, config, keying) = (self.ctx, self.config, self.keying());
+        let mut expansions =
+            map_in_order(tasks, |task| expand_leaf(ctx, env, &config, keying, task));
+        // Every expanded system back before any case is placed: a case of
+        // one expansion may collide with the pending class of another, or of
+        // its own, whose representative the canonical table canonicalizes
+        // from the store.
+        for expansion in expansions.iter_mut().flatten() {
+            self.store[expansion.c as usize] = expansion.stored.take();
+        }
+        for expansion in expansions {
+            self.integrate_expansion(expansion?)?;
+        }
+        Ok(())
+    }
+
+    /// Records `expansion`'s ranking and adds its applied methods in prior
+    /// order, until the class settles.
+    fn integrate_expansion(&mut self, expansion: Expansion) -> Result<(), ProveError> {
+        let Expansion {
+            c,
+            stored: _,
+            path_len,
+            ranked,
+            docs,
+            actions,
+            mut results,
+        } = expansion;
+        // Eager keying: what no worker could key, before any case is placed.
+        self.table.precompute(
+            results
+                .iter_mut()
+                .filter_map(|(_, applied, _)| applied.as_mut().ok()?.as_mut())
+                .flat_map(|applied| Child::prepared_mut(&mut applied.cases)),
+            |r| kept_system(&self.store, &self.retained, r).map(system_to_term),
+            &mut self.stats.work,
+        );
+        self.stats.expansions += 1;
         let ext = &mut self.graph.class_mut(c).ext;
         ext.expanded = true;
+        ext.in_flight = false;
         ext.ranked = ranked;
         ext.docs = docs;
         ext.actions = actions;
-        ext.path_len = path.len() as u32;
-
-        let results: Vec<(usize, Option<Applied>, WorkStats)> = {
-            let ctx = self.ctx;
-            let stored = self.store[c as usize].as_ref().expect("kept above");
-            if tasks.len() <= 1 {
-                tasks
-                    .into_iter()
-                    .map(|(i, method)| {
-                        let (applied, work) = run_method(ctx, env, stored, &method, cut, merge);
-                        (i, applied, work)
-                    })
-                    .collect()
-            } else {
-                // A `System` may move between threads but not be shared:
-                // each task gets its own copy.
-                let forked: Vec<(usize, ProofMethod, Stored)> = tasks
-                    .into_iter()
-                    .map(|(i, method)| (i, method, stored.fork()))
-                    .collect();
-                forked
-                    .into_par_iter()
-                    .map(|(i, method, stored)| {
-                        let (applied, work) = run_method(ctx, env, &stored, &method, cut, merge);
-                        (i, applied, work)
-                    })
-                    .collect()
-            }
-        };
+        ext.path_len = path_len;
+        ext.max_methods = self.config.max_methods;
         for (rank, applied, work) in results {
             self.stats.work.add(&work);
+            self.graph.class_mut(c).ext.expand_s += work.busy.as_secs_f64();
+            let applied = applied?;
             if self.graph.class(c).status != Status::Open {
                 // Settled by an earlier method: the rest stay virtual and
                 // are never picked.
                 continue;
             }
             match applied {
+                // Past the cap the method stays virtual, and is never picked.
+                Some(_) if self.graph.class(c).ext.capped() => {}
                 Some(applied) => {
                     self.integrate(c, rank, applied);
                 }
@@ -691,29 +1298,47 @@ impl<'a> Engine<'a> {
                 None => self.drop_action(c, rank),
             }
         }
+        self.forget_keyed();
         self.tidy(c);
+        Ok(())
     }
 
     /// Applies `c`'s virtual method `rank`.
-    fn materialize(&mut self, env: &WorkerEnv, c: ClassId, rank: usize) -> Materialized {
+    fn materialize(
+        &mut self,
+        env: &WorkerEnv,
+        c: ClassId,
+        rank: usize,
+    ) -> Result<Materialized, ProveError> {
         self.stats.materializations += 1;
         let cut = self.cut_children(c);
         let method = self.graph.class(c).ext.ranked[rank].clone();
         let stored = self.store[c as usize]
             .as_ref()
             .expect("a class with a virtual method keeps its system");
-        let (applied, work) = run_method(self.ctx, env, stored, &method, cut, self.config.merge);
+        let (applied, work) = run_method(self.ctx, env, stored, &method, cut, self.keying());
         self.stats.work.add(&work);
-        let outcome = match applied {
-            Some(applied) => Materialized::Applied(self.integrate(c, rank, applied)),
-            None if Instant::now() >= self.deadline => return Materialized::Aborted,
+        self.graph.class_mut(c).ext.expand_s += work.busy.as_secs_f64();
+        let outcome = match applied? {
+            Some(mut applied) => {
+                // Eager keying: what the method's run could not key.
+                self.table.precompute(
+                    Child::prepared_mut(&mut applied.cases),
+                    |r| kept_system(&self.store, &self.retained, r).map(system_to_term),
+                    &mut self.stats.work,
+                );
+                let a = self.integrate(c, rank, applied);
+                self.forget_keyed();
+                Materialized::Applied(a)
+            }
+            None if Instant::now() >= self.deadline => return Ok(Materialized::Aborted),
             None => {
                 self.drop_action(c, rank);
                 Materialized::NotApplicable
             }
         };
         self.tidy(c);
-        outcome
+        Ok(outcome)
     }
 
     /// TamRL's `maybe_repath`: recomputes `c`'s priors when `path` reaches
@@ -745,18 +1370,21 @@ impl<'a> Engine<'a> {
         c: ClassId,
         on_path: &[ClassId],
         progress: &mut bool,
-    ) -> Option<u16> {
+    ) -> Result<Option<u16>, ProveError> {
         loop {
-            let a = match *ranked_picks(&self.graph, c, on_path).first()? {
+            let Some(&pick) = ranked_picks(&self.graph, c, on_path).first() else {
+                return Ok(None);
+            };
+            let a = match pick {
                 Pick::Method(a) => a,
                 Pick::Virtual(rank) => {
                     *progress = true;
-                    match self.materialize(env, c, rank) {
-                        Materialized::Aborted => return None,
+                    match self.materialize(env, c, rank)? {
+                        Materialized::Aborted => return Ok(None),
                         Materialized::NotApplicable => continue,
                         Materialized::Applied(a) => {
                             if self.graph.class(c).status != Status::Open {
-                                return None;
+                                return Ok(None);
                             }
                             if !method_selectable(&self.graph, c, a as usize, on_path) {
                                 continue;
@@ -767,41 +1395,69 @@ impl<'a> Engine<'a> {
                 }
             };
             self.graph.class_mut(c).ext.and_visits[a as usize] += 1;
-            return Some(a);
+            return Ok(Some(a));
         }
     }
 
-    /// One traversal from the root; whether it expanded or applied anything.
-    fn step(&mut self, env: &WorkerEnv) -> bool {
-        let mut path: Vec<(ClassId, u16)> = Vec::new();
-        let mut on_path = vec![ROOT];
-        let mut c = ROOT;
-        let mut progress = false;
+    /// Continues `t` from the last class it entered down to an unexpanded
+    /// class with a system, which it claims, or to where nothing is left to
+    /// pick.
+    fn select_from(&mut self, env: &WorkerEnv, t: &mut Traversal) -> Result<(), ProveError> {
+        let mut c = *t.on_path.last().expect("a traversal starts at a class");
+        t.end = TraversalEnd::Done;
         while self.graph.class(c).status == Status::Open {
-            if !self.graph.class(c).ext.expanded {
-                if self.store[c as usize].is_some() {
-                    self.expand(env, c, &path);
-                    progress = true;
+            let ext = &self.graph.class(c).ext;
+            if !ext.expanded {
+                if self.store[c as usize].is_some() && !ext.in_flight {
+                    self.graph.class_mut(c).ext.in_flight = true;
+                    t.end = TraversalEnd::Leaf(c);
+                    t.progress = true;
                 }
-                break;
+                return Ok(());
             }
-            self.maybe_repath(c, &path);
-            let Some(a) = self.pick_method(env, c, &on_path, &mut progress) else {
-                break;
+            self.maybe_repath(c, &t.path);
+            let Some(a) = self.pick_method(env, c, &t.on_path, &mut t.progress)? else {
+                return Ok(());
             };
             let k = if self.graph.class(c).ands[a as usize].cases.len() == 1 {
                 0
             } else {
-                let k = pick_case(&self.graph, c, a, &on_path)
+                let k = pick_case(&self.graph, c, a, &t.on_path, self.config.case_order)
                     .expect("a selectable method has an enterable case");
                 self.graph.class_mut(c).ext.case_visits[a as usize][k] += 1;
                 k
             };
-            path.push((c, a));
+            let pending = &mut self.graph.class_mut(c).ext.pending_merge[a as usize][k];
+            if *pending {
+                *pending = false;
+                self.stats.merges_used += 1;
+            }
+            t.path.push((c, a));
             c = self.graph.class(c).ands[a as usize].cases[k].1;
-            on_path.push(c);
+            t.on_path.push(c);
         }
-        progress
+        Ok(())
+    }
+
+    /// One round (see the module docs): up to `batch` traversals within the
+    /// budget, then their systems keyed and expanded together. Whether any
+    /// traversal claimed a system or applied a method.
+    fn round(&mut self, env: &WorkerEnv) -> Result<bool, ProveError> {
+        let mut ts = Vec::new();
+        while ts.len() < self.config.batch
+            && (self.config.budget == 0 || self.stats.steps < self.config.budget)
+            && self.graph.class(ROOT).status == Status::Open
+        {
+            self.stats.steps += 1;
+            let mut t = Traversal::from_root();
+            self.select_from(env, &mut t)?;
+            ts.push(t);
+        }
+        self.key_leaves(env, &mut ts)?;
+        self.expand_leaves(env, &ts)?;
+        let idle = ts.iter().filter(|t| !t.progress).count();
+        self.stats.idle_steps += idle as u64;
+        Ok(idle < ts.len())
     }
 
     /// Marks every open class that reaches nothing to expand as dead, and
@@ -834,7 +1490,7 @@ impl<'a> Engine<'a> {
         }
         for c in 0..n as ClassId {
             if self.graph.class(c).status != Status::Open {
-                self.store[c as usize] = None;
+                self.release(c);
             } else if !alive[c as usize] {
                 self.graph.class_mut(c).ext.dead = true;
             }
@@ -842,45 +1498,151 @@ impl<'a> Engine<'a> {
         alive[ROOT as usize]
     }
 
-    fn search(&mut self, env: &WorkerEnv) -> End {
+    fn search(&mut self, env: &WorkerEnv) -> Result<End, ProveError> {
         loop {
             if self.graph.class(ROOT).status != Status::Open {
-                return End::Settled;
+                return Ok(End::Settled);
             }
             if Instant::now() >= self.deadline {
-                return End::Deadline;
+                return Ok(End::Deadline);
             }
             if self.config.budget > 0 && self.stats.steps >= self.config.budget {
-                return End::Budget;
+                return Ok(End::Budget);
             }
-            self.stats.steps += 1;
             self.report_progress();
-            if !self.step(env) {
-                self.stats.idle_steps += 1;
-                if self.graph.class(ROOT).status == Status::Open
-                    && Instant::now() < self.deadline
-                    && !self.sweep()
-                {
-                    return End::Exhausted;
-                }
+            // An idle round triggers a sweep (see the module docs).
+            if !self.round(env)?
+                && self.graph.class(ROOT).status == Status::Open
+                && Instant::now() < self.deadline
+                && !self.sweep()
+            {
+                return Ok(End::Exhausted);
             }
         }
     }
 }
 
-/// Applies `method` to `stored`'s system in a worker environment.
+/// Expands a claimed class off the search thread: ranks its candidates,
+/// computes their priors from the query of its path, and applies the best
+/// `top_n` concurrently, each to its own copy of the system.
+fn expand_leaf(
+    ctx: &ProofContext,
+    env: &WorkerEnv,
+    config: &McgsConfig,
+    keying: MethodKeying<'_>,
+    task: LeafTask,
+) -> Result<Expansion, ProveError> {
+    let LeafTask {
+        c,
+        stored,
+        depth,
+        cut,
+        query,
+        path_len,
+    } = task;
+    let use_bm25 = config.idf_weight != 0.0;
+    let (ranked, docs) = env.run(ctx, avoid_fresh_state(&stored.sys), |worker_ctx| {
+        let ranked = candidate_methods(&stored.sys, worker_ctx, depth as usize)?;
+        let docs: Vec<Vec<String>> = if use_bm25 {
+            ranked
+                .iter()
+                .map(|m| bm25::tokens(&bm25::method_text(m, &stored.sys)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok::<_, ProveError>((ranked, docs))
+    })?;
+    let priors = priors(config, &docs, ranked.len(), &query);
+    let actions: Vec<Action> = priors
+        .into_iter()
+        .map(|prior| Action {
+            prior,
+            state: ActionState::Virtual,
+        })
+        .collect();
+    let mut eager = by_prior(&actions, |_| true);
+    if config.top_n > 0 {
+        eager.truncate(config.top_n as usize);
+    }
+    let tasks: Vec<(usize, ProofMethod)> = eager.iter().map(|&i| (i, ranked[i].clone())).collect();
+    let results = if tasks.len() <= 1 {
+        tasks
+            .into_iter()
+            .map(|(i, method)| {
+                let (applied, work) = run_method(ctx, env, &stored, &method, cut, keying);
+                (i, applied, work)
+            })
+            .collect()
+    } else {
+        // A `System` may move between threads but not be shared: each task
+        // gets its own copy.
+        let forked: Vec<(usize, ProofMethod, Stored)> = tasks
+            .into_iter()
+            .map(|(i, method)| (i, method, stored.fork()))
+            .collect();
+        forked
+            .into_par_iter()
+            .map(|(i, method, stored)| {
+                let (applied, work) = run_method(ctx, env, &stored, &method, cut, keying);
+                (i, applied, work)
+            })
+            .collect()
+    };
+    Ok(Expansion {
+        c,
+        stored: Some(stored),
+        path_len,
+        ranked,
+        docs,
+        actions,
+        results,
+    })
+}
+
+/// Maps `items` through `f`, concurrently when there are several; the
+/// results keep the items' order.
+fn map_in_order<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync + Send) -> Vec<R> {
+    if items.len() <= 1 {
+        items.into_iter().map(f).collect()
+    } else {
+        items.into_par_iter().map(f).collect()
+    }
+}
+
+/// How [`run_method`] keys what it produces.
+#[derive(Clone, Copy)]
+struct MethodKeying<'t> {
+    /// Eager keying: the canonical table the cases are prepared for.
+    /// Otherwise they stay unkeyed, and [`Engine::key_leaves`] keys a case
+    /// when a traversal claims it.
+    cases_for: Option<&'t CanonicalTable>,
+    /// Merging on: the method gets its key.
+    merge: bool,
+}
+
+/// Applies `method` to `stored`'s system in a worker environment, keyed as
+/// `keying` says.
 fn run_method(
     ctx: &ProofContext,
     env: &WorkerEnv,
     stored: &Stored,
     method: &ProofMethod,
     cut: bool,
-    merge: bool,
-) -> (Option<Applied>, WorkStats) {
+    keying: MethodKeying<'_>,
+) -> (Result<Option<Applied>, ProveError>, WorkStats) {
     let start = Instant::now();
     let mut work = WorkStats::default();
     let applied = env.run(ctx, avoid_fresh_state(&stored.sys), |worker_ctx| {
-        apply_method(worker_ctx, stored, method, cut, merge, &mut work)
+        apply_method(
+            worker_ctx,
+            stored,
+            method,
+            cut,
+            keying.cases_for,
+            keying.merge,
+            &mut work,
+        )
     });
     work.busy = start.elapsed();
     (applied, work)
@@ -899,18 +1661,19 @@ pub fn run(
     proof_bound: usize,
     config: McgsConfig,
     deadline: Instant,
-) -> ProofNode {
+) -> Result<ProofNode, ProveError> {
     let start = Instant::now();
     let bound = u32::try_from(proof_bound)
         .unwrap_or(u32::MAX)
         .min(DEPTH_CAP);
     let mut engine = Engine::new(ctx, config, bound, deadline);
     engine.add_root(initial.clone());
-    let end = engine.search(&WorkerEnv::capture(Some(deadline)));
+    let end = engine.search(&WorkerEnv::capture(Some(deadline)))?;
     let searched = start.elapsed();
     engine.reporter.finish(
         &ctx.lemma_name,
         &engine.graph,
+        &engine.table,
         &engine.merge_counts(),
         &engine.stats.work,
         end,
@@ -918,24 +1681,33 @@ pub fn run(
 
     // Materializing runs methods again; the deadline the search may have hit
     // must not cut that short.
-    let previous_deadline = search::replace_deadline(None);
+    let no_deadline = search::capture_search_tls(None);
     let materialize_start = Instant::now();
+    let kept = KeptSystems::new(
+        std::mem::take(&mut engine.store),
+        std::mem::take(&mut engine.retained),
+    );
     let materializer = Materializer {
         graph: &engine.graph,
+        table: &engine.table,
+        kept: &kept,
         merge: config.merge,
         bound,
         end,
         env: WorkerEnv::capture(None),
         label: "MCGS",
     };
-    let root = materializer.root(ctx, initial);
+    let root = {
+        let _tls = search::SearchTlsGuard::install(no_deadline);
+        materializer.root(ctx, initial)?
+    };
     let materialized = materialize_start.elapsed();
-    search::replace_deadline(previous_deadline);
+    (engine.store, engine.retained) = kept.into_inner();
 
     if tamarin_utils::env_gate!("TAM_RS_MCGS_STATS") {
         print_stats(ctx, &config, &engine, end, &root, searched, materialized);
     }
-    root
+    Ok(root)
 }
 
 fn print_stats(
@@ -957,19 +1729,38 @@ fn print_stats(
         .filter(|c| c.parents.len() > 1)
         .count();
     let dead = engine.graph.classes.iter().filter(|c| c.ext.dead).count();
+    // Merging on: the classes with a key, and the cases no traversal entered
+    // yet, which hold their systems unkeyed.
+    let keyed = engine.table.keyed();
+    let unkeyed = engine
+        .graph
+        .classes
+        .iter()
+        .zip(&engine.store)
+        .filter(|(c, stored)| config.merge && !c.keyed && stored.is_some())
+        .count();
+    let (_, peak_rss) = search_graph::rss_mb();
     eprintln!(
-        "[mcgs] lemma={} budget={} top_n={} temperature={} heuristic_weight={} idf_weight={} \
-         idf_query={:?} merge={} end={:?} root={:?} steps={} idle_steps={} expansions={} \
-         classes={} leaves={} merges={} shared={} dead={} applied={} materializations={} \
-         not_applicable={} repaths={} execs={} canons={} canon_s={:.3} busy_s={:.3} \
-         search_s={:.3} materialize_s={:.3}",
+        "[mcgs] lemma={} budget={} batch={} keying={:?} shadow_keys={} top_n={} temperature={} \
+         heuristic_weight={} idf_weight={} \
+         idf_query={:?} max_methods={} case_order={:?} merge={} end={:?} root={:?} steps={} \
+         idle_steps={} expansions={} \
+         classes={} keyed={} unkeyed={} leaves={} merges={} merges_used={} merges_settled={} \
+         merges_on_path={} shadow_dups={} shared={} dead={} applied={} \
+         materializations={} not_applicable={} repaths={} execs={} canons={} canon_s={:.3} \
+         key_wall_s={:.3} busy_s={:.3} search_s={:.3} materialize_s={:.3} peak_rss_mb={}",
         ctx.lemma_name,
         config.budget,
+        config.batch,
+        config.keying,
+        config.shadow_keys,
         config.top_n,
         config.temperature,
         config.heuristic_weight,
         config.idf_weight,
         config.idf_query,
+        config.max_methods,
+        config.case_order,
         config.merge,
         end,
         root.status,
@@ -977,8 +1768,14 @@ fn print_stats(
         s.idle_steps,
         s.expansions,
         engine.graph.classes.len(),
+        keyed,
+        unkeyed,
         s.leaves,
         s.merges,
+        s.merges_used,
+        s.merges_settled,
+        s.merges_on_path,
+        s.shadow_dups,
         shared,
         dead,
         s.applied,
@@ -988,15 +1785,18 @@ fn print_stats(
         s.work.execs,
         s.work.canons,
         s.work.canon_time.as_secs_f64(),
+        s.key_wall.as_secs_f64(),
         s.work.busy.as_secs_f64(),
         searched.as_secs_f64(),
         materialized.as_secs_f64(),
+        peak_rss.map_or("-".to_string(), |v| v.to_string()),
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraint::solver::canon_table::CanonMode;
     use crate::constraint::solver::search::{run_proof_search, NodeStatus};
     use crate::constraint::solver::search_graph::test_support::{
         ctx, empty_disjunction, two_branch_disjunction, two_true_formulas, unproducible_action,
@@ -1033,6 +1833,7 @@ mod tests {
         ext.and_rank.push(rank);
         ext.and_visits.push(0);
         ext.case_visits.push(vec![0; children.len()]);
+        ext.pending_merge.push(vec![false; children.len()]);
         for (i, &d) in children.iter().enumerate() {
             g.add_case(c, a, format!("case_{i}"), d);
         }
@@ -1093,15 +1894,23 @@ mod tests {
         let (x, y, z) = (open(&mut g), open(&mut g), open(&mut g));
         let a = apply(&mut g, c, 0, &[x, y, z]);
         assert_eq!(
-            pick_case(&g, c, a, &[c]),
+            pick_case(&g, c, a, &[c], CaseOrder::Visits),
             Some(0),
             "all unvisited: name order"
         );
         g.class_mut(c).ext.case_visits[0] = vec![1, 0, 0];
-        assert_eq!(pick_case(&g, c, a, &[c]), Some(1));
-        assert_eq!(pick_case(&g, c, a, &[c, y]), Some(2), "y is on the path");
+        assert_eq!(pick_case(&g, c, a, &[c], CaseOrder::Visits), Some(1));
+        assert_eq!(
+            pick_case(&g, c, a, &[c, y], CaseOrder::Visits),
+            Some(2),
+            "y is on the path"
+        );
         g.class_mut(z).ext.dead = true;
-        assert_eq!(pick_case(&g, c, a, &[c, y]), Some(0), "z is dead");
+        assert_eq!(
+            pick_case(&g, c, a, &[c, y], CaseOrder::Visits),
+            Some(0),
+            "z is dead"
+        );
     }
 
     #[test]
@@ -1203,35 +2012,50 @@ mod tests {
     }
 
     /// A verdict the greedy search reaches, MCGS reaches too, for one or all
-    /// methods per expansion, with and without merging, and the same proof
-    /// on a second run.
+    /// methods per expansion, without merging, with merging under either
+    /// keying, with shadow keys, one or four traversals per round, and the
+    /// same proof on a second run.
     fn assert_reaches_the_greedy_verdict(make: impl Fn() -> System, bound: usize) {
         let Some(mut ctx) = ctx() else {
             return;
         };
         ctx.lemma_text = std::sync::Arc::from("lemma l: \"All x #i. Out(x) @ #i ==> F\"");
-        let greedy = run_proof_search(&ctx, make(), bound);
-        let merges: &[bool] = if crate::bliss_proc::bliss_available() {
-            &[false, true]
-        } else {
-            &[false]
-        };
-        for &merge in merges {
+        let greedy = run_proof_search(&ctx, make(), bound).expect("proof search");
+        let bliss = crate::bliss_proc::bliss_available();
+        // (merge, keying, shadow keys)
+        let mut modes = vec![(false, Keying::Jit, false)];
+        if bliss {
+            modes.push((true, Keying::Jit, false));
+            modes.push((true, Keying::Eager, false));
+            modes.push((false, Keying::Jit, true));
+        }
+        for &(merge, keying, shadow_keys) in &modes {
             for top_n in [1, 0] {
-                ctx.mcgs = Some(mcgs(top_n, merge));
-                let first = run_proof_search(&ctx, make(), bound);
-                if matches!(
-                    greedy.status,
-                    NodeStatus::Solved | NodeStatus::Contradictory
-                ) {
-                    assert_eq!(first.status, greedy.status, "top_n={top_n} merge={merge}");
+                for batch in [1, 4] {
+                    let setting = format!(
+                        "top_n={top_n} merge={merge} keying={keying:?} shadow={shadow_keys} \
+                         batch={batch}"
+                    );
+                    ctx.mcgs = Some(McgsConfig {
+                        batch,
+                        keying,
+                        shadow_keys,
+                        ..mcgs(top_n, merge)
+                    });
+                    let first = run_proof_search(&ctx, make(), bound).expect("proof search");
+                    if matches!(
+                        greedy.status,
+                        NodeStatus::Solved | NodeStatus::Contradictory
+                    ) {
+                        assert_eq!(first.status, greedy.status, "{setting}");
+                    }
+                    let second = run_proof_search(&ctx, make(), bound).expect("proof search");
+                    assert_eq!(
+                        pretty_proof_body(&first),
+                        pretty_proof_body(&second),
+                        "deterministic: {setting}"
+                    );
                 }
-                let second = run_proof_search(&ctx, make(), bound);
-                assert_eq!(
-                    pretty_proof_body(&first),
-                    pretty_proof_body(&second),
-                    "deterministic: top_n={top_n} merge={merge}"
-                );
             }
         }
     }
@@ -1259,11 +2083,11 @@ mod tests {
         let Some(mut ctx) = ctx() else {
             return;
         };
-        let greedy = run_proof_search(&ctx, unproducible_action(), 1);
+        let greedy = run_proof_search(&ctx, unproducible_action(), 1).expect("proof search");
         assert_eq!(greedy.status, NodeStatus::Sorry);
         for top_n in [1, 0] {
             ctx.mcgs = Some(mcgs(top_n, false));
-            let proof = run_proof_search(&ctx, unproducible_action(), 1);
+            let proof = run_proof_search(&ctx, unproducible_action(), 1).expect("proof search");
             assert_eq!(proof.status, NodeStatus::Contradictory, "top_n={top_n}");
             assert!(
                 matches!(proof.method, ProofMethod::SolveGoal(_)),
@@ -1283,12 +2107,361 @@ mod tests {
             top_n: 1,
             ..McgsConfig::with_budget(1)
         });
-        let proof = run_proof_search(&ctx, unproducible_action(), 10);
+        let proof = run_proof_search(&ctx, unproducible_action(), 10).expect("proof search");
         assert!(
             matches!(proof.method, ProofMethod::Simplify),
             "one step applies the best-ranked method only, got {:?}",
             proof.method
         );
         assert_ne!(proof.status, NodeStatus::Contradictory);
+    }
+
+    // --- Rounds (maude) ----------------------------------------------------
+
+    /// An engine whose canonical tables decide in `mode`.
+    fn engine_in(ctx: &ProofContext, config: McgsConfig, mode: CanonMode) -> Engine<'_> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut engine = Engine::new(ctx, config, DEPTH_CAP, deadline);
+        engine.table = CanonicalTable::new(mode);
+        engine.shadow = CanonicalTable::new(mode);
+        engine
+    }
+
+    /// An engine in `mode` whose root, `two_branch_disjunction`, is expanded
+    /// with one applied method whose cases are `cases`, created unkeyed at
+    /// depth 1.
+    fn engine_with_cases(
+        ctx: &ProofContext,
+        config: McgsConfig,
+        mode: CanonMode,
+        cases: Vec<System>,
+    ) -> (Engine<'_>, u16, Vec<ClassId>) {
+        let mut engine = engine_in(ctx, config, mode);
+        engine.add_root(two_branch_disjunction());
+        let ext = &mut engine.graph.class_mut(ROOT).ext;
+        ext.expanded = true;
+        ext.actions = vec![Action {
+            prior: 1.0,
+            state: ActionState::Virtual,
+        }];
+        let classes: Vec<ClassId> = cases
+            .into_iter()
+            .map(|sys| engine.intern(Child::Unkeyed(Stored::new(sys, None)), 1))
+            .collect();
+        let a = apply(&mut engine.graph, ROOT, 0, &classes);
+        (engine, a, classes)
+    }
+
+    /// The case a traversal claimed is not enterable for the next traversal
+    /// of the round.
+    #[test]
+    fn a_claimed_class_is_not_claimed_again_in_its_round() {
+        let Some(ctx) = ctx() else {
+            return;
+        };
+        let config = McgsConfig {
+            idf_weight: 0.0,
+            batch: 2,
+            ..McgsConfig::with_budget(0)
+        };
+        let (mut engine, _, cases) =
+            engine_with_cases(&ctx, config, CanonMode::On, vec![unproducible_action()]);
+        let env = WorkerEnv::capture(None);
+        let mut first = Traversal::from_root();
+        engine.select_from(&env, &mut first).expect("select");
+        let mut second = Traversal::from_root();
+        engine.select_from(&env, &mut second).expect("select");
+        assert_eq!(first.end, TraversalEnd::Leaf(cases[0]));
+        assert_eq!(second.end, TraversalEnd::Done, "the only case is claimed");
+        assert!(!second.progress);
+    }
+
+    // --- Merging (maude, bliss) ------------------------------------------
+
+    /// Cases are created unkeyed. Two claimed cases with one key are keyed
+    /// in one pass: the first keeps the key, the second merges into it, and
+    /// its traversal ends, since the first is claimed.
+    #[test]
+    fn two_claimed_cases_with_one_key_are_one_class() {
+        let Some(ctx) = ctx() else {
+            return;
+        };
+        if !crate::bliss_proc::bliss_available() {
+            return;
+        }
+        // `off` keys the root when it is created, `on` only on a collision.
+        for (mode, at_creation, after) in [(CanonMode::Off, 1, 3), (CanonMode::On, 0, 2)] {
+            let config = McgsConfig {
+                merge: true,
+                idf_weight: 0.0,
+                batch: 2,
+                ..McgsConfig::with_budget(0)
+            };
+            let (mut engine, a, cases) = engine_with_cases(
+                &ctx,
+                config,
+                mode,
+                vec![unproducible_action(), unproducible_action()],
+            );
+            assert_eq!(engine.stats.work.canons, at_creation, "{mode:?}");
+            let env = WorkerEnv::capture(None);
+            let mut ts: Vec<Traversal> = (0..2)
+                .map(|_| {
+                    let mut t = Traversal::from_root();
+                    engine.select_from(&env, &mut t).expect("select");
+                    t
+                })
+                .collect();
+            assert_eq!(
+                ts.iter().map(|t| t.end).collect::<Vec<_>>(),
+                vec![TraversalEnd::Leaf(cases[0]), TraversalEnd::Leaf(cases[1])]
+            );
+
+            engine.key_leaves(&env, &mut ts).expect("key");
+            assert_eq!(ts[0].end, TraversalEnd::Leaf(cases[0]));
+            assert_eq!(ts[1].end, TraversalEnd::Done);
+            assert!(engine.graph.class(cases[0]).keyed);
+            assert!(engine.store[cases[0] as usize]
+                .as_ref()
+                .is_some_and(|stored| stored.labelling.is_some()));
+            assert!(engine.store[cases[1] as usize].is_none());
+            let targets: Vec<ClassId> = engine.graph.class(ROOT).ands[a as usize]
+                .cases
+                .iter()
+                .map(|&(_, d)| d)
+                .collect();
+            assert_eq!(targets, vec![cases[0], cases[0]]);
+            assert_eq!(engine.stats.merges, 1);
+            assert_eq!(engine.stats.work.canons, after, "{mode:?}");
+        }
+    }
+
+    /// A traversal whose case merges into an expanded class goes on from it
+    /// and claims that class's case, which the next pass keys.
+    #[test]
+    fn a_merged_traversal_goes_on_and_the_next_pass_keys_its_new_claim() {
+        let Some(ctx) = ctx() else {
+            return;
+        };
+        if !crate::bliss_proc::bliss_available() {
+            return;
+        }
+        // `off`: the root, the case and the claim below; `on`: the case and
+        // the class it merges into, whose invariant it shares.
+        for (mode, canons) in [(CanonMode::Off, 3), (CanonMode::On, 2)] {
+            let config = McgsConfig {
+                merge: true,
+                idf_weight: 0.0,
+                ..McgsConfig::with_budget(0)
+            };
+            let (mut engine, a, cases) =
+                engine_with_cases(&ctx, config, mode, vec![unproducible_action()]);
+            // An expanded class with the case's key, and one unkeyed case below.
+            let existing =
+                engine.intern(Child::Unkeyed(Stored::new(unproducible_action(), None)), 3);
+            let prepared = engine
+                .table
+                .prepare(&unproducible_action(), &mut WorkStats::default());
+            let placed = engine
+                .table
+                .intern(prepared, || existing, &mut WorkStats::default());
+            assert!(!placed.merged);
+            engine.graph.mark_keyed(existing);
+            let ext = &mut engine.graph.class_mut(existing).ext;
+            ext.expanded = true;
+            ext.actions = vec![Action {
+                prior: 1.0,
+                state: ActionState::Virtual,
+            }];
+            let below = engine.intern(Child::Unkeyed(Stored::new(two_true_formulas(), None)), 4);
+            apply(&mut engine.graph, existing, 0, &[below]);
+
+            let env = WorkerEnv::capture(None);
+            let mut ts = vec![Traversal::from_root()];
+            engine.select_from(&env, &mut ts[0]).expect("select");
+            assert_eq!(ts[0].end, TraversalEnd::Leaf(cases[0]));
+            engine.key_leaves(&env, &mut ts).expect("key");
+            assert_eq!(ts[0].end, TraversalEnd::Leaf(below));
+            assert_eq!(ts[0].path, vec![(ROOT, a), (existing, 0)]);
+            assert_eq!(engine.graph.class(cases[0]).ext.merged_into, Some(existing));
+            assert_eq!(
+                engine.graph.class(ROOT).ands[a as usize].cases[0].1,
+                existing
+            );
+            assert!(engine.graph.class(below).keyed);
+            assert_eq!(engine.stats.merges, 1);
+            assert_eq!(engine.stats.work.canons, canons, "{mode:?}");
+        }
+    }
+
+    /// Eager keying canonicalizes a case when its method is applied: a
+    /// second case with the first's key merges into its class at once, its
+    /// system is never stored, and no class is left unkeyed. The merge is
+    /// used once a traversal goes through it.
+    #[test]
+    fn eager_keying_merges_a_case_when_its_method_is_applied() {
+        let Some(ctx) = ctx() else {
+            return;
+        };
+        if !crate::bliss_proc::bliss_available() {
+            return;
+        }
+        for mode in [CanonMode::Off, CanonMode::On] {
+            let config = McgsConfig {
+                merge: true,
+                keying: Keying::Eager,
+                idf_weight: 0.0,
+                ..McgsConfig::with_budget(0)
+            };
+            let mut engine = engine_in(&ctx, config, mode);
+            engine.add_root(two_branch_disjunction());
+            let ext = &mut engine.graph.class_mut(ROOT).ext;
+            ext.expanded = true;
+            ext.actions = vec![Action {
+                prior: 1.0,
+                state: ActionState::Virtual,
+            }];
+            let mut work = WorkStats::default();
+            let mut cases: Vec<(String, Child)> = (0..2)
+                .map(|i| {
+                    let child =
+                        classify(&ctx, unproducible_action(), Some(&engine.table), &mut work);
+                    (format!("case_{i}"), child)
+                })
+                .collect();
+            // What no worker could key, as `integrate_expansion` does first.
+            engine.table.precompute(
+                Child::prepared_mut(&mut cases),
+                |r| kept_system(&engine.store, &engine.retained, r).map(system_to_term),
+                &mut work,
+            );
+            let a = engine.integrate(
+                ROOT,
+                0,
+                Applied {
+                    method: ProofMethod::Simplify,
+                    method_key: None,
+                    cases,
+                },
+            );
+            let targets: Vec<ClassId> = engine.graph.class(ROOT).ands[a as usize]
+                .cases
+                .iter()
+                .map(|&(_, d)| d)
+                .collect();
+            assert_eq!(
+                targets[0], targets[1],
+                "the second case merged into the first"
+            );
+            assert_eq!(engine.stats.merges, 1);
+            assert_eq!(
+                engine.stats.merges_used, 0,
+                "no traversal went through it yet"
+            );
+            assert_eq!(engine.graph.class(targets[0]).ext.merged_into, None);
+            assert_eq!(
+                engine.store.len(),
+                engine.graph.classes.len(),
+                "the merged case made no class"
+            );
+            let counts = engine.merge_counts();
+            assert_eq!(counts.stored_unkeyed, 0);
+            assert_eq!(counts.stored, 2, "the root and the one case class");
+
+            let env = WorkerEnv::capture(None);
+            for _ in 0..2 {
+                let mut t = Traversal::from_root();
+                engine.select_from(&env, &mut t).expect("select");
+                if let TraversalEnd::Leaf(c) = t.end {
+                    engine.graph.class_mut(c).ext.in_flight = false;
+                }
+            }
+            assert_eq!(
+                engine.stats.merges_used, 1,
+                "the second traversal goes through the merged case"
+            );
+        }
+    }
+
+    /// Shadow keys find a duplicate among claimed systems without merging
+    /// it: both classes keep their systems and stay apart.
+    #[test]
+    fn shadow_keys_mark_a_duplicate_without_merging() {
+        let Some(ctx) = ctx() else {
+            return;
+        };
+        if !crate::bliss_proc::bliss_available() {
+            return;
+        }
+        for mode in [CanonMode::Off, CanonMode::On] {
+            let config = McgsConfig {
+                shadow_keys: true,
+                idf_weight: 0.0,
+                batch: 2,
+                ..McgsConfig::with_budget(0)
+            };
+            let (mut engine, a, cases) = engine_with_cases(
+                &ctx,
+                config,
+                mode,
+                vec![unproducible_action(), unproducible_action()],
+            );
+            let env = WorkerEnv::capture(None);
+            let mut ts: Vec<Traversal> = (0..2)
+                .map(|_| {
+                    let mut t = Traversal::from_root();
+                    engine.select_from(&env, &mut t).expect("select");
+                    t
+                })
+                .collect();
+            engine.key_leaves(&env, &mut ts).expect("key");
+            assert_eq!(
+                ts.iter().map(|t| t.end).collect::<Vec<_>>(),
+                vec![TraversalEnd::Leaf(cases[0]), TraversalEnd::Leaf(cases[1])],
+                "nothing merged"
+            );
+            assert_eq!(engine.graph.class(cases[1]).ext.dup_of, Some(cases[0]));
+            assert_eq!(engine.graph.class(cases[0]).ext.dup_of, None);
+            assert_eq!(engine.stats.shadow_dups, 1);
+            assert_eq!(engine.stats.merges, 0);
+            assert!(engine.store[cases[0] as usize].is_some());
+            assert!(engine.store[cases[1] as usize].is_some());
+            assert_eq!(
+                engine.graph.class(ROOT).ands[a as usize]
+                    .cases
+                    .iter()
+                    .map(|&(_, d)| d)
+                    .collect::<Vec<_>>(),
+                cases
+            );
+        }
+    }
+
+    /// A case no traversal entered has no key; the proof shows it open.
+    #[test]
+    fn a_case_no_traversal_entered_shows_as_undecided() {
+        let Some(mut ctx) = ctx() else {
+            return;
+        };
+        if !crate::bliss_proc::bliss_available() {
+            return;
+        }
+        ctx.mcgs = Some(McgsConfig {
+            top_n: 1,
+            merge: true,
+            ..McgsConfig::with_budget(1)
+        });
+        let proof = run_proof_search(&ctx, unproducible_action(), 10).expect("proof search");
+        assert!(
+            matches!(proof.method, ProofMethod::Simplify),
+            "got {:?}",
+            proof.method
+        );
+        let case = proof.children.values().next().expect("simplify has a case");
+        assert!(
+            matches!(&case.method, ProofMethod::Sorry(Some(m)) if m == "MCGS: undecided"),
+            "got {:?}",
+            case.method
+        );
     }
 }

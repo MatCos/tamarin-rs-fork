@@ -1,20 +1,18 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Transcript pins for the tool-probe section HS `testProcess`
-//! (Console.hs:97-149) writes, driven through the `test` command's
-//! `ensureGraphVizDot` caller (Test.hs:50, Environment.hs:72-101) and through
-//! `ensureMaude` (Console.hs:151-185), which every mode but `--parse-only`
+//! (Console.hs) writes, driven through the `test` command's
+//! `ensureGraphVizDot` caller (Test.hs, Environment.hs) and through
+//! `ensureMaude` (Console.hs), which every mode but `--parse-only`
 //! runs first.
 //!
 //! Every expected stderr block is an oracle capture of the pinned Haskell
 //! prover run with the same flags.  The `test` command is the cheap way to
 //! reach the dot probes — interactive mode runs the same
-//! `ensureGraphVizDot`/`ensureGraphCommand` calls (Interactive.hs:106-108) but
+//! `ensureGraphVizDot`/`ensureGraphCommand` calls (Interactive.hs) but
 //! then binds a socket and blocks.
 
-use std::path::Path;
 use std::process::Command;
 
 mod common;
@@ -39,7 +37,7 @@ fn run_test_command(extra: &[&str]) -> (i32, String, String) {
 }
 
 /// The `test` command's stdout around the tool section: only the `nextTopic`
-/// headers and the blank line Test.hs:49 puts between the maude and dot
+/// headers and the blank line Test.hs puts between the maude and dot
 /// blocks, since every probe line goes to stderr.  HS additionally prints a
 /// `*** Testing the unification infrastructure ***` topic for its HUnit suite,
 /// which this port does not run.
@@ -80,7 +78,7 @@ fn missing_dot_reports_the_spawn_exception() {
     );
 }
 
-/// Oracle (`test --with-dot=/bin/true`): the tool starts and exits 0, but its
+/// Oracle (`test --with-dot=true`): the tool starts and exits 0, but its
 /// stderr carries no `graphviz`, so `check` fails with `Left "Error."` and the
 /// `Detailed results` block dumps the empty streams.  `ensureGraphVizDot`
 /// returns `Nothing`, so the PNG probe is skipped and no blank line follows.
@@ -90,29 +88,25 @@ fn non_graphviz_dot_reports_the_detailed_results_block() {
         eprintln!("skipping: maude not where the run will look for it");
         return;
     }
-    if !Path::new("/bin/true").exists() {
-        eprintln!("skipping: no /bin/true to stand in for a non-Graphviz dot");
-        return;
-    }
-    let (rc, stdout, stderr) = run_test_command(&["--with-dot=/bin/true"]);
+    let (rc, stdout, stderr) = run_test_command(&["--with-dot=true"]);
     assert_eq!(rc, 1);
     assert_eq!(stdout, FAILED_RUN_STDOUT);
     assert_eq!(
         common::strip_maude_banner(&stderr),
-        "GraphViz tool: '/bin/true'\n\
+        "GraphViz tool: 'true'\n\
          \x20checking version: Error.\n\
-         Detailed results from testing '/bin/true'\n\
-         \x20command: /bin/true -V\n\
+         Detailed results from testing 'true'\n\
+         \x20command: true -V\n\
          \x20stdin:   \n\
          \x20stdout:  \n\
          \x20stderr:  \n"
     );
 }
 
-/// Oracle command: `test --with-dot=/bin/false`.  The tool starts but exits 1.
+/// Oracle command: `test --with-dot=false`.  The tool starts but exits 1.
 /// The code consults the exit code before `check` runs at all.  The reason is
 /// therefore the `failed with exit code 1` line, followed by
-/// `ensureGraphVizDot`'s `errMsg1` (Environment.hs:88-95).  This is the only
+/// `ensureGraphVizDot`'s `errMsg1` (Environment.hs).  This is the only
 /// route by which that WARNING block reaches a transcript.  `unlines` has
 /// already terminated the block, so a blank line separates it from the
 /// `Detailed results` dump.  `ensureGraphVizDot` returns `Nothing`.  The code
@@ -127,16 +121,12 @@ fn bad_exit_dot_reports_the_exit_code_reason_line() {
         eprintln!("skipping: maude not where the run will look for it");
         return;
     }
-    if !Path::new("/bin/false").exists() {
-        eprintln!("skipping: no /bin/false to stand in for a dot that exits non-zero");
-        return;
-    }
-    let (rc, stdout, stderr) = run_test_command(&["--with-dot=/bin/false"]);
+    let (rc, stdout, stderr) = run_test_command(&["--with-dot=false"]);
     assert_eq!(rc, 1);
     assert_eq!(stdout, FAILED_RUN_STDOUT);
     assert_eq!(
         common::strip_maude_banner(&stderr),
-        "GraphViz tool: '/bin/false'\n\
+        "GraphViz tool: 'false'\n\
          \x20checking version: failed with exit code 1\n\
          \n\
          WARNING:\n\
@@ -146,8 +136,8 @@ fn bad_exit_dot_reports_the_exit_code_reason_line() {
          \x20Please download an official version from:\n\
          \x20        http://www.graphviz.org/\n\
          \n\
-         Detailed results from testing '/bin/false'\n\
-         \x20command: /bin/false -V\n\
+         Detailed results from testing 'false'\n\
+         \x20command: false -V\n\
          \x20stdin:   \n\
          \x20stdout:  \n\
          \x20stderr:  \n"
@@ -167,7 +157,17 @@ fn working_dot_reports_version_and_png_ok() {
     if !common::dot_available() {
         return;
     }
-    let (rc, _stdout, stderr) = run_test_command(&[]);
+    let (rc, stdout, stderr) = run_test_command(&[]);
+    // batch-tamarin's launch_tamarin_test requires both success markers.
+    assert!(stdout.contains("All tests successful"), "{stdout}");
+    assert!(
+        stdout.contains("The tamarin-prover should work as intended"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Maude/GraphViz availability checks only"),
+        "{stdout}"
+    );
     let probe = common::strip_maude_banner(&stderr);
     let lines: Vec<&str> = probe.lines().collect();
     assert_eq!(rc, 0, "expected a clean self-test, got:\n{probe}");
@@ -195,7 +195,7 @@ fn working_dot_reports_version_and_png_ok() {
 /// The stderr a maude that cannot be started produces, whatever mode asked for
 /// it: `testProcess`' exception block — with NO trailing blank line, because
 /// `maudeTest` takes the `error` branch instead of `putStrErrLn ""` — followed
-/// by GHC's top-level report of that `error` (Console.hs:147).
+/// by GHC's top-level report of that `error` (Console.hs).
 const MISSING_MAUDE_STDERR: &str = "maude tool: '/nonexistent/maude'\n\
      \x20checking version: caught exception while executing:\n\
      /nonexistent/maude --version\n\
@@ -232,7 +232,7 @@ fn missing_maude_aborts_the_test_command() {
 }
 
 /// Oracle (`--with-maude=/nonexistent/maude tiny.spthy`): a batch run's
-/// `ensureMaudeAndGetVersion` (Batch.hs:115) aborts in the same place, before
+/// `ensureMaudeAndGetVersion` (Batch.hs) aborts in the same place, before
 /// the first `[Theory …]` marker, leaving stdout completely empty.
 #[test]
 fn missing_maude_aborts_a_batch_run() {
@@ -258,7 +258,7 @@ fn missing_maude_aborts_a_batch_run() {
     );
 }
 
-/// `variants` runs the same probe (Intruder.hs:45) and dies the same way,
+/// `variants` runs the same probe (Intruder.hs) and dies the same way,
 /// before it writes any variant computation output.  The oracle's stdout is
 /// empty here.  A run that aborts after it prints a variant table has a
 /// different stdout.
@@ -278,10 +278,10 @@ fn missing_maude_aborts_the_variants_command() {
 }
 
 /// `interactive` probes through `ensureMaudeAndGetVersion`
-/// (Interactive.hs:103) and dies before binding any socket — no port
+/// (Interactive.hs) and dies before binding any socket — no port
 /// allocation is needed.  The oracle's stdout is empty.  That is the half
 /// that shows the abort comes first.  The `Finished loading theories …
-/// server ready at` line (Interactive.hs:125) is a stdout `println!`.
+/// server ready at` line (Interactive.hs) is a stdout `println!`.
 #[test]
 fn missing_maude_aborts_interactive_before_binding() {
     let dir = std::env::temp_dir().join("tamarin_rs_probe_reports_nomaude_wd");
@@ -303,44 +303,36 @@ fn missing_maude_aborts_interactive_before_binding() {
 /// A maude that STARTS but reports an unsupported version is not fatal: the
 /// version probe's `Left` reason is `errMsg`, the installation probe still
 /// runs, and the run carries on (`ensureMaude`'s `Bool` is discarded
-/// everywhere but `test`).  `/bin/echo` stands in: it answers `--version`
-/// with coreutils' banner and, run bare, writes nothing to stderr.
+/// everywhere but `test`).  `echo` stands in: it answers `--version`
+/// with non-Maude output and, run bare, writes nothing to stderr.
 #[test]
 fn unsupported_maude_reports_but_does_not_abort() {
-    if !Path::new("/bin/echo").exists() {
-        eprintln!("skipping: no /bin/echo to stand in for an unsupported maude");
-        return;
-    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tamarin-rs"));
     let out = cmd
-        .args([
-            "test",
-            "--with-maude=/bin/echo",
-            "--with-dot=/nonexistent/dot",
-        ])
+        .args(["test", "--with-maude=echo", "--with-dot=/nonexistent/dot"])
         .output()
         .expect("spawn tamarin-rs");
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     let echo_version = String::from_utf8(
-        Command::new("/bin/echo")
+        Command::new("echo")
             .arg("--version")
             .output()
-            .expect("spawn /bin/echo")
+            .expect("spawn echo")
             .stdout,
     )
     .expect("utf-8 echo --version");
     assert_eq!(
         stderr,
         format!(
-            "maude tool: '/bin/echo'\n\
+            "maude tool: 'echo'\n\
              \x20checking version: WARNING:\n\
              \n\
              \x20'maude --version' returned unsupported version '{stripped}'\n\
              \x20Please install one of the following versions of Maude: \
              2.7.1, 3.0, 3.1, 3.2.1, 3.2.2, 3.3, 3.3.1, 3.4, 3.5, 3.5.1\n\
              \n\
-             Detailed results from testing '/bin/echo'\n\
-             \x20command: /bin/echo --version\n\
+             Detailed results from testing 'echo'\n\
+             \x20command: echo --version\n\
              \x20stdin:   \n\
              \x20stdout:  {echo_version}\n\
              \x20stderr:  \n\

@@ -1,11 +1,10 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Pre-computed intruder-variant rule loaders.
 //!
 //! HS-faithful port of `Main.TheoryLoader.mkDhIntruderVariants` and
-//! `mkBpIntruderVariants` (src/Main/TheoryLoader.hs:853-876):
+//! `mkBpIntruderVariants` (src/Main/TheoryLoader.hs):
 //!
 //! ```haskell
 //! dhIntruderVariantsFile :: FilePath
@@ -25,7 +24,7 @@
 //!
 //! The cached files at `data/intruder_variants_dh.spthy` (51 rules) and
 //! `data/intruder_variants_bp.spthy` (75 rules) were produced by HS's
-//! `Main.Mode.Intruder.run` (src/Main/Mode/Intruder.hs:43-63, see line 48) — that mode
+//! `Main.Mode.Intruder.run` (src/Main/Mode/Intruder.hs) — that mode
 //! invokes `dhIntruderRules False`/`bpIntruderRules False` against
 //! Maude and pretty-prints the result.  See [`crate::intruder_rules`]
 //! for the Rust port of `dhIntruderRules`, which IS still used as a
@@ -33,7 +32,7 @@
 //! the production runtime path.
 //!
 //! The committed BP cache holds 75 rules, one more than the regenerator
-//! emits: `minimizeIntruderRules` (IntruderRules.hs:190-208) subsumes
+//! emits: `minimizeIntruderRules` (IntruderRules.hs) subsumes
 //! rules via the Maude-backed `equalDuplicateRuleUpToRenaming` /
 //! `equalSubsetRuleUpToRenaming`, collapsing one `d_em` variant that the
 //! cached file still lists, so `tamarin-prover variants` on the pinned
@@ -50,25 +49,25 @@ use crate::fact::LNFact;
 use crate::intruder_rules::show_fun_sym_name;
 use crate::rule::{IntrRuleAC, IntrRuleACInfo, Rule};
 
-/// HS `dhIntruderVariantsFile` (TheoryLoader.hs:853-854, see line 854).
+/// HS `dhIntruderVariantsFile` (TheoryLoader.hs).
 pub const DH_INTRUDER_VARIANTS_FILE: &str = "data/intruder_variants_dh.spthy";
 
-/// HS `bpIntruderVariantsFile` (TheoryLoader.hs:857-858, see line 858).
+/// HS `bpIntruderVariantsFile` (TheoryLoader.hs).
 pub const BP_INTRUDER_VARIANTS_FILE: &str = "data/intruder_variants_bp.spthy";
 
 /// The DH intruder-variants spthy source, embedded at compile time
 /// (HS uses `$(embedFile "data/intruder_variants_dh.spthy")` —
-/// TheoryLoader.hs:861-867, see line 867).
+/// TheoryLoader.hs).
 pub const DH_INTRUDER_VARIANTS_SPTHY: &str =
     include_str!("../../../tamarin-prover/data/intruder_variants_dh.spthy");
 
 /// The BP intruder-variants spthy source, embedded at compile time
 /// (HS uses `$(embedFile "data/intruder_variants_bp.spthy")` —
-/// TheoryLoader.hs:870-876, see line 876).
+/// TheoryLoader.hs).
 pub const BP_INTRUDER_VARIANTS_SPTHY: &str =
     include_str!("../../../tamarin-prover/data/intruder_variants_bp.spthy");
 
-/// HS `mkDhIntruderVariants` (TheoryLoader.hs:861-867).
+/// HS `mkDhIntruderVariants` (TheoryLoader.hs).
 ///
 /// ```haskell
 /// mkDhIntruderVariants :: MaudeSig -> [IntrRuleAC]
@@ -90,7 +89,7 @@ pub fn mk_dh_intruder_variants(msig: &MaudeSig) -> Vec<IntrRuleAC> {
         })
 }
 
-/// HS `mkBpIntruderVariants` (TheoryLoader.hs:870-876).
+/// HS `mkBpIntruderVariants` (TheoryLoader.hs).
 pub fn mk_bp_intruder_variants(msig: &MaudeSig) -> Vec<IntrRuleAC> {
     parse_intruder_rules(msig, BP_INTRUDER_VARIANTS_FILE, BP_INTRUDER_VARIANTS_SPTHY)
         .unwrap_or_else(|e| {
@@ -102,7 +101,7 @@ pub fn mk_bp_intruder_variants(msig: &MaudeSig) -> Vec<IntrRuleAC> {
 }
 
 /// Error from `parse_intruder_rules`.  Includes the source file label
-/// (HS `ctxtDesc` — Theory/Text/Parser/Rule.hs:224-228, see line 226) for human-readable
+/// (HS `ctxtDesc` — Theory/Text/Parser/Rule.hs) for human-readable
 /// diagnostics.
 #[derive(Debug, Clone)]
 pub struct IntrRuleParseError {
@@ -118,7 +117,7 @@ impl std::fmt::Display for IntrRuleParseError {
 
 impl std::error::Error for IntrRuleParseError {}
 
-/// HS `parseIntruderRules` (Theory/Text/Parser/Rule.hs:224-228):
+/// HS `parseIntruderRules` (Theory/Text/Parser/Rule.hs):
 ///
 /// ```haskell
 /// parseIntruderRules
@@ -129,45 +128,37 @@ impl std::error::Error for IntrRuleParseError {}
 /// ```
 ///
 /// The `setState (mkStateSig msig)` step is critical: HS's term parser
-/// (Theory/Text/Parser/Term.hs:139-153, see line 151) dispatches bare identifiers via
+/// (Theory/Text/Parser/Term.hs) dispatches bare identifiers via
 /// `nullaryApp` against `funSyms maudeSig` to distinguish 0-arity NoEq
 /// applications (e.g. `one`, `DH_neutral` for `dhFunSig`) from free
 /// variables.  Without it, the cached DH file's
-/// `[ ] --[ !KU( one ) ]-> [ !KU( one ) ]` rule (intruder_variants_dh.spthy:8)
+/// `[ ] --[ !KU( one ) ]-> [ !KU( one ) ]` rule (`c_one` in
+/// `data/intruder_variants_dh.spthy`)
 /// parses `one` as a Msg-sort variable whose !KU-action unifies with
 /// every KU goal — adding a spurious `c_one` case to every source-case
 /// enumeration and falsely closing branches with `SOLVED // trace found`.
-///
-/// We mirror this here via [`MaudeSigNullaryGuard`], which pushes the
-/// 0-arity NoEq names from `msig` into the `USER_NULLARY_FUNS`
-/// thread-local (defined in elaborate.rs) read by `term_to_lnterm`'s
-/// `Var` branch, via `is_user_nullary_fun` (defined in elaborate.rs).
-/// The guard restores the prior state on drop.
+/// The port's `p::parse_intruder_rules` takes `msig` for the same reason.
 pub fn parse_intruder_rules(
     msig: &MaudeSig,
     ctxt_desc: &str,
     source: &str,
 ) -> Result<Vec<IntrRuleAC>, IntrRuleParseError> {
-    let parser_rules = p::parse_intruder_rules(source).map_err(|e| IntrRuleParseError {
+    let parser_rules = p::parse_intruder_rules(msig, source).map_err(|e| IntrRuleParseError {
         ctxt_desc: ctxt_desc.to_string(),
         message: e.to_string(),
     })?;
-
-    // Mirror HS `setState (mkStateSig msig)` — make the term-conversion
-    // pass below see the 0-arity NoEq names from `msig` so bare
-    // identifiers like `one` / `DH_neutral` are recognised as constants.
-    let _nullary_guard = elaborate::MaudeSigNullaryGuard::set(msig);
 
     // HS `knownFuns = S.toList (funSyms msig)`.
     let known_funs = KnownFuns::new(msig.fun_syms.iter().copied().collect());
 
     let mut out = Vec::with_capacity(parser_rules.len());
     for r in parser_rules {
-        let intr =
-            ast_rule_to_intr_rule_ac(&known_funs, &r).map_err(|message| IntrRuleParseError {
+        let intr = ast_rule_to_intr_rule_ac(&known_funs, msig, &r).map_err(|message| {
+            IntrRuleParseError {
                 ctxt_desc: ctxt_desc.to_string(),
                 message,
-            })?;
+            }
+        })?;
         out.push(intr);
     }
     Ok(out)
@@ -188,7 +179,7 @@ struct KnownFuns {
     /// returns the earliest match in `S.toList` order, and two DISTINCT
     /// symbols can share a `showFunSymName` — a user-defined AC symbol and a
     /// user-defined NoEq symbol may carry the same name, and `Ord FunSym`
-    /// (FunctionSymbols.hs:150-154) orders `NoEq` before `AC`, so the NoEq
+    /// (FunctionSymbols.hs) orders `NoEq` before `AC`, so the NoEq
     /// one is the earlier.  An `insert` loop would let the later symbol win
     /// and silently change which `FunSym` lands in the rule info.
     by_name: std::collections::BTreeMap<std::borrow::Cow<'static, str>, FunSym>,
@@ -293,7 +284,11 @@ fn constr_name_func(name: &str) -> Result<Vec<&str>, String> {
 /// `True False` are HS hard-codes — see the FIXME in
 /// Theory/Text/Parser/Rule.hs ("Currently we (wrongly) always assume
 /// that we have a subterm rule").  Subterm=True / constant=False.
-fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrRuleAC, String> {
+fn ast_rule_to_intr_rule_ac(
+    known_funs: &KnownFuns,
+    msig: &MaudeSig,
+    r: &p::Rule,
+) -> Result<IntrRuleAC, String> {
     // HS `intrInfo` rejects non-c/d-prefixed names.  Mirror that here.
     let bytes = r.name.as_bytes();
     if bytes.is_empty() {
@@ -338,15 +333,9 @@ fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrR
     };
 
     // HS `genericRule msgvar nodevar` returns `(ps, as, cs, [])`.
-    // The let block, restrictions, variants, and left/right fields
-    // are all empty for intruder rules.  Surface them as elaboration
-    // errors if present (defensive).
-    if !r.let_block.is_empty() {
-        return Err(format!(
-            "intruder rule {} unexpectedly has a let-block",
-            r.name
-        ));
-    }
+    // The restrictions, variants, and left/right fields are all empty for
+    // intruder rules.  Surface them as elaboration errors if present
+    // (defensive).
     if !r.embedded_restrictions.is_empty() {
         return Err(format!(
             "intruder rule {} unexpectedly has embedded restrictions",
@@ -373,7 +362,7 @@ fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrR
         .premises
         .iter()
         .map(|f| {
-            elaborate::fact_to_lnfact(f)
+            elaborate::fact_to_lnfact(f, msig)
                 .map_err(|e| format!("intruder rule {}: premise: {}", r.name, e.message))
         })
         .collect::<Result<_, _>>()?;
@@ -381,7 +370,7 @@ fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrR
         .actions
         .iter()
         .map(|f| {
-            elaborate::fact_to_lnfact(f)
+            elaborate::fact_to_lnfact(f, msig)
                 .map_err(|e| format!("intruder rule {}: action: {}", r.name, e.message))
         })
         .collect::<Result<_, _>>()?;
@@ -389,7 +378,7 @@ fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrR
         .conclusions
         .iter()
         .map(|f| {
-            elaborate::fact_to_lnfact(f)
+            elaborate::fact_to_lnfact(f, msig)
                 .map_err(|e| format!("intruder rule {}: conclusion: {}", r.name, e.message))
         })
         .collect::<Result<_, _>>()?;
@@ -398,50 +387,16 @@ fn ast_rule_to_intr_rule_ac(known_funs: &KnownFuns, r: &p::Rule) -> Result<IntrR
     // but not premises.  The intruder-rule `.spthy` files don't have
     // any (all RHS vars are LHS vars), but compute it faithfully for
     // robustness.  HS reference: Theory.Model.Fact.newVariables
-    // (lib/theory/src/Theory/Model/Fact.hs:524-529, see line 527).
-    let new_vars = compute_new_vars(&prems, &concs);
+    // (lib/theory/src/Theory/Model/Fact.hs).
+    let new_vars = crate::fact::new_variables(&prems, &concs);
 
     Ok(Rule::new(info, prems, concs, acts).with_new_vars(new_vars))
 }
 
-/// Mirrors HS `newVariables` (`lib/theory/src/Theory/Model/Fact.hs:524-529, see line 527`):
-/// `S.difference concvars premvars`, returned in `S.toList` (sorted) order.
-fn compute_new_vars(prems: &[LNFact], concs: &[LNFact]) -> Vec<tamarin_term::lterm::LNTerm> {
-    use std::collections::BTreeSet;
-    use tamarin_term::lterm::LVar;
-    use tamarin_term::term::Term;
-    use tamarin_term::vterm::Lit;
-
-    fn collect(t: &tamarin_term::lterm::LNTerm, out: &mut BTreeSet<LVar>) {
-        match t {
-            Term::Lit(Lit::Var(v)) => {
-                out.insert(*v);
-            }
-            Term::Lit(_) => {}
-            Term::App(_, args) => {
-                for a in args.iter() {
-                    collect(a, out);
-                }
-            }
-        }
-    }
-
-    let collect_all = |fs: &[LNFact]| -> BTreeSet<LVar> {
-        let mut vars = BTreeSet::new();
-        for f in fs {
-            for t in f.terms.iter() {
-                collect(t, &mut vars);
-            }
-        }
-        vars
-    };
-
-    let prem_vars = collect_all(prems);
-    collect_all(concs)
-        .into_iter()
-        .filter(|v| !prem_vars.contains(v))
-        .map(|v| Term::Lit(Lit::Var(v)))
-        .collect()
+/// Elaborate one top-level `rule (modulo AC)` parsed in an ordinary theory.
+pub(crate) fn intr_rule_from_ast(msig: &MaudeSig, r: &p::Rule) -> Result<IntrRuleAC, String> {
+    let known_funs = KnownFuns::new(msig.fun_syms.iter().copied().collect());
+    ast_rule_to_intr_rule_ac(&known_funs, msig, r)
 }
 
 // =============================================================================

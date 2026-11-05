@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! End-to-end tests for the `tamarin-prover` CLI library.
 //!
@@ -16,6 +15,7 @@ mod common;
 
 use common::{fixture, maude_arg, maude_available, normalize_stdout, run_binary};
 use std::path::{Path, PathBuf};
+use tamarin_prover::run::RunError;
 use tamarin_prover::{parse_args, run};
 
 fn args_from(args: &[&str]) -> tamarin_prover::Args {
@@ -31,6 +31,13 @@ fn run_cli(extra: &[&str]) -> i32 {
     run(&args_from(&argv)).expect("run")
 }
 
+fn run_error(extra: &[&str]) -> RunError {
+    let maude = maude_arg();
+    let mut argv: Vec<&str> = maude.as_deref().into_iter().collect();
+    argv.extend_from_slice(extra);
+    run(&args_from(&argv)).expect_err("run should fail")
+}
+
 #[test]
 fn prove_chain_writes_output_with_verified_summary() {
     if !maude_available() {
@@ -43,7 +50,7 @@ fn prove_chain_writes_output_with_verified_summary() {
     std::fs::create_dir_all(&out_dir).expect("mkdir out_dir");
     let out_path = out_dir.join("single_recv_out.spthy");
 
-    // `-o`/`--output` is a cmdargs `flagOpt` (Batch.hs:44-84, see line 76): its value is
+    // `-o`/`--output` is a cmdargs `flagOpt` (Batch.hs): its value is
     // OPTIONAL and must be ATTACHED — `-o FILE` (space-separated) leaves the
     // flag empty and treats FILE as a positional input (verified vs the HS
     // binary). So pass it inline via `--output=FILE`.
@@ -76,13 +83,49 @@ fn prove_chain_writes_output_with_verified_summary() {
         body
     );
     // HS writes `renderDoc d` VERBATIM to the `-o` file (`writeFileWithDirs`,
-    // Batch.hs:127); only the stdout arm goes through `putStrLn` (Batch.hs:133).
+    // Batch.hs); only the stdout arm goes through `putStrLn` (Batch.hs).
     // The file therefore ends with the bytes `end` — no trailing newline
     // (oracle-verified on this fixture and on the `-m` translate captures).
     assert!(
         body.ends_with("end"),
         "-o file must end with `end`, no trailing newline; got tail: {:?}",
         &body[body.len().saturating_sub(8)..]
+    );
+}
+
+/// A stored proof whose chain steps name node variables with the same root
+/// names (`(#vr.6, 0) ~~> (#vk.1, 0)` while another `#vr…`/`#vk…` chain goal is
+/// open) replays in full: the checker binds a stored goal by structural
+/// equality with an open one, full node variables included, as HS's
+/// `M.member` does.  A checker that matched chain goals on the root names
+/// bound the wrong goal, and this proof checked as `analysis incomplete`
+/// with 64 steps `/* unannotated */`.
+#[test]
+fn stored_chain_steps_replay_by_full_node_variables() {
+    if !maude_available() {
+        eprintln!("skipping: maude not on path");
+        return;
+    }
+
+    let in_path = fixture("replay_chain_goal_identity.spthy");
+    let out_dir = std::env::temp_dir().join("tamarin_prover_e2e_replay_chain");
+    std::fs::create_dir_all(&out_dir).expect("mkdir out_dir");
+    let out_path = out_dir.join("replay_chain_goal_identity_out.spthy");
+    let output_arg = format!("--output={}", out_path.to_str().unwrap());
+
+    let (code, stdout, stderr) = run_binary(&[&output_arg], &[&in_path]);
+    assert_eq!(
+        code, 0,
+        "expected exit code 0, got {code}; stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("recentalive_tag (all-traces): verified"),
+        "the stored proof must check as verified; got:\n{stdout}"
+    );
+    let body = std::fs::read_to_string(&out_path).expect("output written");
+    assert!(
+        !body.contains("unannotated") && !body.contains("sorry"),
+        "every stored step must replay; got:\n{body}"
     );
 }
 
@@ -101,7 +144,7 @@ fn prove_lemma_filter_excludes_other_lemmas() {
     // Filter to a lemma that doesn't exist — every lemma is filtered
     // out and we still write an output.
     // flagOpt: attach the output value (`--output=FILE`); a space-separated
-    // `-o FILE` would treat FILE as a positional input (HS Batch.hs:44-84, see line 76).
+    // `-o FILE` would treat FILE as a positional input (HS Batch.hs).
     let output_arg = format!("--output={}", out_path.to_str().unwrap());
     let code = run_cli(&[
         "--prove=nonexistent",
@@ -123,12 +166,147 @@ fn prove_lemma_filter_excludes_other_lemmas() {
 }
 
 #[test]
+fn missing_oracle_fails_without_emitting_the_failed_theory() {
+    if !maude_available() {
+        eprintln!("skipping: maude not on path");
+        return;
+    }
+
+    let theory = fixture("oracle_missing.spthy");
+    let (code, stdout, stderr) = run_binary(&["--prove=test"], &[&theory]);
+    assert_eq!(code, 1, "missing oracle must be a handled batch failure");
+    assert!(stdout.is_empty(), "failed proof leaked stdout:\n{stdout}");
+    assert!(
+        stderr.contains("oracle exec error:"),
+        "failure should identify the oracle:\n{stderr}"
+    );
+}
+
+#[test]
+fn precompute_guarded_failures_use_the_ghc_exception_boundary() {
+    if !maude_available() {
+        eprintln!("skipping: maude not on path");
+        return;
+    }
+
+    for fixture_name in ["guarded_restriction.spthy", "guarded_source.spthy"] {
+        let theory = fixture(fixture_name);
+        let (code, stdout, stderr) = run_binary(&["--precompute-only"], &[&theory]);
+        assert_eq!(code, 1, "{fixture_name} must be a handled batch failure");
+        assert!(stdout.is_empty(), "{fixture_name} leaked stdout:\n{stdout}");
+        assert!(
+            stderr.contains("tamarin-prover: unguarded variable")
+                && !stderr.contains("error: guarded conversion:"),
+            "wrong error boundary for {fixture_name}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn auto_sources_does_not_use_existential_source_lemmas_as_assumptions() {
+    if !maude_available() {
+        return;
+    }
+    let theory = fixture("guarded_existential_source.spthy");
+    let (code, stdout, stderr) = run_binary(&["--auto-sources"], &[&theory]);
+    assert_eq!(
+        code, 0,
+        "existential source annotation must not abort loading: {stderr}"
+    );
+    assert!(
+        stdout.contains("typing"),
+        "loaded theory was not rendered: {stdout}"
+    );
+}
+
+#[test]
+fn stored_terminal_replay_emits_a_state_for_each_node() {
+    if !maude_available() {
+        eprintln!("skipping: maude not on path");
+        return;
+    }
+
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_tamarin-rs"));
+    if let Some(maude) = maude_arg() {
+        cmd.arg(maude);
+    }
+    let output = cmd
+        .env("TAM_RS_TRACE_STATE", "1")
+        .arg(fixture("terminal_replay.spthy"))
+        .output()
+        .expect("spawn tamarin-rs");
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    let (_, replay_trace) = stderr
+        .split_once("[Theory TerminalReplay] Theory closed\n")
+        .expect("closed marker before replay trace");
+    let states: Vec<_> = replay_trace
+        .lines()
+        .filter(|line| line.starts_with("[STATE]"))
+        .collect();
+    assert_eq!(states.len(), 2, "{stderr}");
+    assert_ne!(states[0], states[1], "replay emitted the same state twice");
+    assert!(
+        states[0].contains("nodes=[]"),
+        "unexpected root state: {stderr}"
+    );
+    assert!(
+        states[1].contains("nodes=[A,Fresh]"),
+        "unexpected child state: {stderr}"
+    );
+}
+
+#[test]
+fn library_returns_batch_failures_instead_of_exiting() {
+    if !maude_available() {
+        eprintln!("skipping: maude not on path");
+        return;
+    }
+
+    for (fixture_name, lemma, expected) in [
+        ("oracle_missing.spthy", "test", "oracle exec error:"),
+        ("guarded_lemma.spthy", "bad", "unguarded variable"),
+        ("guarded_restriction.spthy", "ok", "unguarded variable"),
+    ] {
+        let theory = fixture(fixture_name);
+        let error = run_error(&[
+            &format!("--prove={lemma}"),
+            theory.to_str().expect("fixture path"),
+        ]);
+        assert!(
+            matches!(error, RunError::GhcException(ref message) if message.contains(expected)),
+            "unexpected error for {fixture_name}: {error:?}"
+        );
+    }
+
+    for fixture_name in ["guarded_restriction.spthy", "guarded_source.spthy"] {
+        let theory = fixture(fixture_name);
+        let error = run_error(&["--precompute-only", theory.to_str().expect("fixture path")]);
+        assert!(
+            matches!(error, RunError::GhcException(ref message) if message.starts_with("unguarded variable")),
+            "unexpected precompute error for {fixture_name}: {error:?}"
+        );
+    }
+
+    let theory = fixture("single_recv.spthy");
+    let error = run_error(&[
+        "--prove=chain",
+        "--heuristic=z",
+        theory.to_str().expect("fixture path"),
+    ]);
+    assert!(
+        matches!(error, RunError::Regular(ref message) if message.contains("unknown goal ranking")),
+        "unexpected heuristic error: {error:?}"
+    );
+}
+
+#[test]
 fn parse_only_pretty_prints_open_theory_to_stdout() {
-    // Oracle-pinned `--parse-only` behavior (HS Batch.hs:91-95): the parsed
+    // Oracle-pinned `--parse-only` behavior (HS Batch.hs): the parsed
     // OPEN theory is pretty-printed (`prettyOpenTheory`) to STDOUT — always,
     // even with `--output=FILE`, which the parseOnly branch never consults
     // (verified: the HS binary writes no file and prints the doc) — and
-    // `loadTheory`'s `[Theory X] Theory loaded` traceM (TheoryLoader.hs:451)
+    // `loadTheory`'s `[Theory X] Theory loaded` traceM (TheoryLoader.hs)
     // lands on stderr.  Needs no Maude.  Bytes captured from the pinned
     // v1.13.0 oracle on tests/fixtures/single_recv.spthy.
     let in_path = fixture("single_recv.spthy");
@@ -190,12 +368,12 @@ fn output_dir_writes_basename_underscore_analyzed() {
     let out_dir = std::env::temp_dir().join("tamarin_prover_outdir");
     let _ = std::fs::remove_dir_all(&out_dir); // clean prior runs
     std::fs::create_dir_all(&out_dir).expect("mkdir out_dir");
-    // `-O`/`--Output` is a cmdargs `flagOpt` (Batch.hs:44-84, see line 77): its value is
+    // `-O`/`--Output` is a cmdargs `flagOpt` (Batch.hs): its value is
     // OPTIONAL and must be ATTACHED — `-O DIR` (space-separated) leaves the
     // flag at its default and treats DIR as a positional input file (verified
     // against the HS binary). So the value must be inline via `--Output=DIR`.
     //
-    // No `--parse-only` here: the HS parseOnly branch (Batch.hs:91-95) never
+    // No `--parse-only` here: the HS parseOnly branch (Batch.hs) never
     // consults `writeOutput`, so it writes NO files (oracle-verified) — the
     // `-O` naming can only be exercised on the (maude-needing) close path.
     // No `--prove` either, so no lemma is actually proven — this stays fast.
@@ -205,7 +383,7 @@ fn output_dir_writes_basename_underscore_analyzed() {
     // The expected output is <out_dir>/single_recv_analyzed.spthy, and it
     // holds the theory itself.  An empty `create()` also satisfies
     // `exists()`, so this test reads the content.  `-O` shares the
-    // `writeFileWithDirs` writer of `-o` (Batch.hs:127).  The document is
+    // `writeFileWithDirs` writer of `-o` (Batch.hs).  The document is
     // therefore written without any change.  It opens on `theory SingleRecv`
     // and ends on the bytes `end`, with no trailing newline.
     let expected = out_dir.join("single_recv_analyzed.spthy");
@@ -426,7 +604,7 @@ fn malformed_configuration_block_errors_only_in_close_modes() {
 /// ordinary NoEq symbol: the intruder's `c_em` construction rule applies and
 /// the trivial exists-trace lemma is `verified`, identically to the same
 /// theory with the function renamed.  DELIBERATE DIVERGENCE from HS, whose
-/// `naryOpApp` (Theory/Text/Parser/Term.hs:103) captures the NAME `em` as the
+/// `naryOpApp` (Theory/Text/Parser/Term.hs) captures the NAME `em` as the
 /// C-symbol unconditionally and then crashes on the first Maude query over
 /// such a term (`tamem` is only declared under `enableBP`) — a documented
 /// upstream bug.  Classifying `em` as C while still emitting the NoEq intruder
@@ -493,7 +671,7 @@ fn user_em_without_bp_builtin_is_a_plain_function() {
 // arrival: the `[Saturating Sources]` traces (both sides trace, with different
 // sequence counts — see the class note in `scripts/sweep_expected.tsv`), and
 // HS's `>>>>>>>>>>>>>>>>>>>>>>>> START INPUT … END Oracle call` block
-// (`oracleRanking`, ProofMethod.hs:604-620), which the port's `oracle_ranking`
+// (`oracleRanking`, ProofMethod.hs), which the port's `oracle_ranking`
 // (tamarin-theory `constraint/solver/goals.rs`) does not emit at all.  Where a
 // flag's only observable IS on stderr, the test asserts the PORT's own marker
 // line and says so in place.
@@ -676,12 +854,12 @@ fn run_pinned_case(name: &str) -> Option<(String, String)> {
 }
 
 /// `--lemma=NAME` narrows what gets proven.  HS appends `--lemma` values to
-/// the SAME `lemmaNames` list `--prove` fills (`TheoryLoader.hs:326`), and
-/// `lemmaSelector` (TheoryLoader.hs:419-431) matches a name exactly unless it
+/// the SAME `lemmaNames` list `--prove` fills (`TheoryLoader.hs`), and
+/// `lemmaSelector` (TheoryLoader.hs) matches a name exactly unless it
 /// ends in `*` — so the bare `--prove`'s recorded `""` matches nothing and
 /// `reach` alone is proven, leaving `leaks` at `by sorry` / `analysis
 /// incomplete`.  The `''` that no lemma matches is also what makes
-/// `checkIfLemmasInTheory` (Wellformedness.hs:1156-1171) fire: its
+/// `checkIfLemmasInTheory` (Wellformedness.hs) fire: its
 /// `lemmaArgsNames == [[]]` guard only excuses a bare `--prove` on its own, so
 /// the pinned bytes carry that wellformedness warning too.
 #[test]
@@ -713,8 +891,8 @@ fn bound_flag_above_the_proof_depth_is_inert() {
 }
 
 /// `-b/--bound=N` at a BINDING depth.  HS wraps the auto-prover in
-/// `boundProver` (`runAutoProver`, Theory/Proof.hs:730-750#runAutoProver), whose
-/// `boundProofDepth` (Theory/Proof.hs:336-344) replaces every proof node at
+/// `boundProver` (`runAutoProver`, Theory/Proof.hs#runAutoProver), whose
+/// `boundProofDepth` (Theory/Proof.hs) replaces every proof node at
 /// depth N with `sorry /* bound N hit */` — even a node that would have been
 /// Solved, since the `0 < n` guard fires before the node is inspected.  On
 /// this fixture `-b=1` cuts both lemmas to `simplify` + bound-sorries and the
@@ -729,7 +907,7 @@ fn bound_flag_at_a_binding_depth_truncates_the_proof() {
 }
 
 /// `--heuristic=i` (`InjRanking False`, `goalRankingIdentifiers`,
-/// Constraint/System.hs:584-595) reaches a different proof than the default
+/// Constraint/System.hs) reaches a different proof than the default
 /// `s`: on this fixture it closes `secrecy` one step sooner, which is what the
 /// `!=chan_plain` relation pins.  The bare-flag and empty-value spellings are
 /// covered by the `Args` tests; this covers the value arriving at the solver.
@@ -789,7 +967,7 @@ fn bound_flag_cuts_parallel_sibling_expansion() {
 
 /// CLI `--heuristic` OVERRIDING a theory's own `heuristic:` header (HS
 /// `apDefaultHeuristic prover <|> L.get pcHeuristic ctx`,
-/// Theory/Proof.hs:706-707) — the load-bearing semantic cli.rs's module doc
+/// Theory/Proof.hs) — the load-bearing semantic cli.rs's module doc
 /// calls out for the bare flag.  The fixture's header says `i`; the
 /// `!=chan_heur_plain` relation proves `--heuristic=s` displaced it in the
 /// oracle's own run, and the port has to match both sides.
@@ -851,7 +1029,7 @@ fn defines_flag_reaches_the_preprocessor() {
 }
 
 /// `-s/--saturation=N` caps the source-saturation loop
-/// (`paramSaturationLimit`, Sources.hs:355-376).
+/// (`paramSaturationLimit`, Sources.hs).
 ///
 /// On a fixture this small the cap changes no PROOF — the `=chan_plain`
 /// relation records that — so the stdout pin alone could not tell the flag
@@ -884,7 +1062,7 @@ fn saturation_flag_caps_the_source_saturation_loop() {
 }
 
 /// `-c/--open-chains=N` caps how many chain constraints the source
-/// precomputation will resolve (`openChainsLimit`, Sources.hs:155).  At 0 the
+/// precomputation will resolve (`openChainsLimit`, Sources.hs).  At 0 the
 /// chains survive into the proof, which changes the PROOF ITSELF — the
 /// `!=chan_plain` relation — so unlike `--saturation` this one is pinned
 /// end-to-end on stdout.  The port's own cap message is asserted as well, to
@@ -905,8 +1083,8 @@ fn open_chains_flag_caps_the_precomputed_chain_resolution() {
 }
 
 /// `--heuristic=o --oraclename=FILE` routes goal ranking through the named
-/// script (`maybeSetOracleRelPath`, TheoryLoader.hs:343-349; `oraclePath`
-/// resolves an ABSOLUTE name as given, Constraint/System.hs:573-574).  The
+/// script (`maybeSetOracleRelPath`, TheoryLoader.hs; `oraclePath`
+/// resolves an ABSOLUTE name as given, Constraint/System.hs).  The
 /// fixture oracle ranks the LAST goal first, an order no built-in ranking
 /// produces, so `!=chan_plain` cannot hold unless the script really ran.
 #[test]
@@ -917,7 +1095,7 @@ fn oraclename_flag_routes_ranking_through_the_named_script() {
 
 /// `--oracle-only` is `quitOnEmpty`: when the oracle names none of a non-empty
 /// goal list, `oracleRanking` returns `Just ApplySorry` and the search stops
-/// (ProofMethod.hs:604-620) instead of falling through to the unranked goals.
+/// (ProofMethod.hs) instead of falling through to the unranked goals.
 /// The `!=chan_oracle_rank_none` relation is what proves the flag, not the
 /// oracle, made the difference.  The control row itself is `=chan_plain`: a
 /// rank-nothing oracle degenerates to goal-number order, which on this
@@ -1069,4 +1247,90 @@ fn cli_ref_cases_files_and_manifest_are_in_sync() {
             src_path.display()
         );
     }
+}
+
+#[test]
+fn input_manifest_lemma_metadata_uses_preprocessed_theory() {
+    let dir = std::env::temp_dir().join(format!("tamarin_lemma_metadata_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let theory = dir.join("root.spthy");
+    std::fs::write(dir.join("fragment.inc"), "lemma included: \"T\" by sorry\n").unwrap();
+    for (source, flags, expected) in [
+        (
+            "theory T begin\n#include \"fragment.inc\"\nend",
+            vec![],
+            "1",
+        ),
+        (
+            "theory T begin lemma inline: \"T\" by sorry end",
+            vec![],
+            "1",
+        ),
+        (
+            "theory T begin\n/*\nlemma commented: \"T\"\n*/\nend",
+            vec![],
+            "0",
+        ),
+        (
+            "theory T begin\n#ifdef ACTIVE\nlemma active: \"T\"\n#endif\nend",
+            vec![],
+            "0",
+        ),
+        (
+            "theory T begin\n#ifdef ACTIVE\nlemma active: \"T\"\n#endif\nend",
+            vec!["-D=ACTIVE"],
+            "1",
+        ),
+    ] {
+        std::fs::write(&theory, source).unwrap();
+        let mut args = flags;
+        args.push("input-manifest");
+        let (code, stdout, stderr) = run_binary(&args, &[&theory]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("M\thas_lemmas\t{expected}")),
+            "{stdout}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn input_manifest_distinguishes_syntax_rejection_from_missing_inputs() {
+    let dir = std::env::temp_dir().join(format!("tamarin_manifest_status_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.join("root.spthy");
+    std::fs::write(dir.join("fragment.inc"), "#include \"missing.spthy\"").unwrap();
+    for (source, expected) in [
+        ("theory T begin end", 0),
+        ("theory T begin ? end", 3),
+        ("theory T begin #include \"missing.spthy\" end", 1),
+        ("theory T begin #include \"fragment.inc\" end", 1),
+    ] {
+        std::fs::write(&root, source).unwrap();
+        let (code, stdout, stderr) = run_binary(&["input-manifest"], &[&root]);
+        assert_eq!(code, expected, "{source}: {stderr}");
+        if code != 0 {
+            assert!(
+                stdout.is_empty(),
+                "failed manifests must not publish rows: {stdout}"
+            );
+            assert!(!stderr.is_empty());
+        }
+        if code == 1 {
+            assert!(stderr.contains("missing.spthy"), "{stderr}");
+        }
+        if code == 3 {
+            assert!(
+                stderr.contains(&root.to_string_lossy().to_string()),
+                "{stderr}"
+            );
+        }
+    }
+    let (code, stdout, stderr) = run_binary(&["input-manifest"], &[&dir.join("absent.spthy")]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
 }

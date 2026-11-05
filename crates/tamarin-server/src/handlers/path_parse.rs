@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Parse the wildcard path segment after `/thy/trace/<idx>/<section>/`
 //! into a [`TheoryPath`], mirroring Haskell's `parseTheoryPath` in
@@ -13,7 +12,7 @@ use percent_encoding::percent_decode_str;
 
 /// A theory-internal path, mirroring Haskell `TheoryPath`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TheoryPath {
+pub(crate) enum TheoryPath {
     Help,
     Rules,
     Message,
@@ -91,7 +90,7 @@ impl TheoryPath {
 
 /// Canonical URL path-segment escaping shared by the theory/graph/proof
 /// handlers: keep `[A-Za-z0-9_.-]`, percent-encode everything else.
-pub fn url_path_escape(s: &str) -> String {
+pub(crate) fn url_path_escape(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             c if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' => c.to_string(),
@@ -102,7 +101,7 @@ pub fn url_path_escape(s: &str) -> String {
 
 /// Match Haskell's `prefixWithUnderscore`.  Empty + `_*` strings get
 /// an extra leading `_` to avoid the empty-segment trap in Yesod.
-pub fn prefix_with_underscore(s: &str) -> String {
+pub(crate) fn prefix_with_underscore(s: &str) -> String {
     if s.is_empty() {
         "_".into()
     } else if s.starts_with('_') {
@@ -117,7 +116,7 @@ pub fn prefix_with_underscore(s: &str) -> String {
 /// (mirrors Yesod `getUrlRender`'s per-segment encoding).  Empty input
 /// yields the empty string, so callers can append the result directly
 /// after `.../proof/<lemma>` or `.../method/<lemma>/<idx>`.
-pub fn encode_sub_path(sub: &[String]) -> String {
+pub(crate) fn encode_sub_path(sub: &[String]) -> String {
     let mut s = String::new();
     for seg in sub {
         s.push('/');
@@ -127,7 +126,7 @@ pub fn encode_sub_path(sub: &[String]) -> String {
 }
 
 /// Inverse of [`prefix_with_underscore`].
-pub fn unprefix_underscore(s: &str) -> String {
+pub(crate) fn unprefix_underscore(s: &str) -> String {
     if s == "_" {
         String::new()
     } else if s.starts_with("__") {
@@ -147,7 +146,7 @@ pub fn unprefix_underscore(s: &str) -> String {
 /// [`unprefix_underscore`] reverses that here.  Trailing empty segments
 /// are dropped by the empty-segment filter, so a leading-only vs both-end
 /// trim of `/` is immaterial.
-pub fn decode_segments(raw: &str) -> Vec<String> {
+pub(crate) fn decode_segments(raw: &str) -> Vec<String> {
     raw.trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
@@ -158,7 +157,7 @@ pub fn decode_segments(raw: &str) -> Vec<String> {
 
 /// Parse a wildcard-captured path (e.g. `proof/Alice/case_1/0`) into a
 /// `TheoryPath`.  Returns `None` on malformed input.
-pub fn parse(raw: &str) -> Option<TheoryPath> {
+pub(crate) fn parse(raw: &str) -> Option<TheoryPath> {
     parse_segs(&decode_segments(raw))
 }
 
@@ -174,7 +173,7 @@ fn parse_segs(segs: &[String]) -> Option<TheoryPath> {
         "add" => rest.first().map(|n| TheoryPath::Add(n.clone())),
         "delete" => rest.first().map(|n| TheoryPath::Delete(n.clone())),
         "proof" => {
-            // Mirror Haskell `parseProof` (`src/Web/Types.hs:424-463, see line 450`):
+            // Mirror Haskell `parseProof` (`src/Web/Types.hs`):
             //   parseProof (y:ys) = Just (TheoryProof y ys)
             // i.e. the sub-path is taken AS-IS (after `unprefixUnderscore`
             // each segment).  We do NOT pop trailing empty segments:
@@ -188,7 +187,7 @@ fn parse_segs(segs: &[String]) -> Option<TheoryPath> {
             Some(TheoryPath::Proof { lemma, sub })
         }
         "method" => {
-            // Mirror Haskell `parseMethod` (`src/Web/Types.hs:424-463, see line 453`):
+            // Mirror Haskell `parseMethod` (`src/Web/Types.hs`):
             //   parseMethod (y:z:zs) = safeRead z >>= Just . TheoryMethod y zs
             // i.e. the sub-path is taken AS-IS (after `unprefixUnderscore`
             // each segment) — including a single empty trailing
@@ -228,7 +227,7 @@ fn parse_segs(segs: &[String]) -> Option<TheoryPath> {
 }
 
 /// Haskell `parseCases`'s `safeRead = listToMaybe . map fst . reads`
-/// (`src/Web/Types.hs:443`) at `ReadS Int`: the two case indices are SIGNED, so
+/// (`src/Web/Types.hs`) at `ReadS Int`: the two case indices are SIGNED, so
 /// a negative one parses and reaches the handler, where it names no case
 /// exactly as index 0 does (see `handlers::theory::source_case_system`).
 ///

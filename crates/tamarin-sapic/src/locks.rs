@@ -1,18 +1,17 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Sapic.Locks` (`lib/sapic/src/Sapic/Locks.hs`) — the lock-annotation
 //! pass.
 //!
-//! `annotateLocks` (Locks.hs:94-99) assigns each `lock` a fresh lock variable
+//! `annotateLocks` (Locks.hs) assigns each `lock` a fresh lock variable
 //! (`freshLVar "lock" LSortMsg`, minted from a SINGLE fast fresh counter that
-//! starts at 0 — `evalFreshT a 0`, Locks.hs:94-99, see line 99) and, via
-//! `annotateEachClosestUnlock` (Locks.hs:34-59), matches that lock variable onto
+//! starts at 0 — `evalFreshT a 0`, Locks.hs) and, via
+//! `annotateEachClosestUnlock` (Locks.hs), matches that lock variable onto
 //! each closest enclosing-scope `unlock` (and `insert`/`lookup`) that shares the
 //! lock's term.
 //!
-//! The pass runs LAST in the annotation pipeline (sapic/src/Sapic.hs:55-61), after
+//! The pass runs LAST in the annotation pipeline (sapic/src/Sapic.hs), after
 //! `propagateNames` / `annotateSecretChannels` / `annotatePureStates`.
 //!
 //! NOTE on the fresh counter: HS `annotateLocks` runs in the *Fast* `FreshT`
@@ -21,7 +20,7 @@
 //! index 0 (`lock`), the second index 1 (`lock.1`), etc.  This counter is
 //! independent of the per-name `renameUnique` counter.
 
-use tamarin_utils::fresh::FastFreshState;
+use tamarin_utils::fresh::{FastFreshState, MonadFresh};
 
 use tamarin_term::lterm::{LSort, LVar};
 use tamarin_theory::sapic::{Process, ProcessCombinator, SapicAction, SapicLVar, SapicTerm};
@@ -30,17 +29,17 @@ use crate::annotation::ProcessAnnotation;
 
 type AnnotatedProc = Process<ProcessAnnotation<LVar>, SapicLVar>;
 
-/// `LocalException` (Locks.hs:28-28): thrown when `annotateEachClosestUnlock`
+/// `LocalException` (Locks.hs): thrown when `annotateEachClosestUnlock`
 /// encounters a `Rep` (`WFRep`) or `Parallel` (`WFPar`) below a lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LockWfError {
+pub(crate) enum LockWfError {
     /// `WFRep` — replication below the lock.
     Rep,
     /// `WFPar` — parallel below the lock.
     Par,
 }
 
-/// `annotateEachClosestUnlock t v p` (Locks.hs:34-59): annotate the closest
+/// `annotateEachClosestUnlock t v p` (Locks.hs): annotate the closest
 /// occurrence of `unlock` (and `insert t _` / `lookup t _`) that has term `t`
 /// with the variable `v`.  Errors on `Rep`/`Parallel` below the lock.
 fn annotate_each_closest_unlock(
@@ -93,7 +92,7 @@ fn annotate_each_closest_unlock(
     }
 }
 
-/// `annotateLocks'` (Locks.hs:74-91): at each `Lock t`, mint a fresh lock
+/// `annotateLocks'` (Locks.hs): at each `Lock t`, mint a fresh lock
 /// variable, annotate the closest matching unlocks under it, then recurse.
 fn annotate_locks_go(
     fresh: &mut FastFreshState,
@@ -106,7 +105,7 @@ fn annotate_locks_go(
             let v = LVar {
                 name: "lock",
                 sort: LSort::Msg,
-                idx: fresh.fresh_ident(),
+                idx: fresh.fresh_ident(""),
             };
             let p1 = annotate_each_closest_unlock(&t, &v, *body)?;
             let p2 = annotate_locks_go(fresh, p1)?;
@@ -129,10 +128,10 @@ fn annotate_locks_go(
     }
 }
 
-/// `annotateLocks` (Locks.hs:94-99): run `annotateLocks'` with the fresh counter
+/// `annotateLocks` (Locks.hs): run `annotateLocks'` with the fresh counter
 /// seeded at 0.  On a wellformedness error (`Rep`/`Parallel` below a lock), HS
 /// `throwM`s a `ProcessNotWellformed (WFLock tag)`; we surface it as an `Err`.
-pub fn annotate_locks(p: AnnotatedProc) -> Result<AnnotatedProc, String> {
+pub(crate) fn annotate_locks(p: AnnotatedProc) -> Result<AnnotatedProc, String> {
     let mut fresh = FastFreshState::nothing_used();
     annotate_locks_go(&mut fresh, p).map_err(|e| match e {
         LockWfError::Rep => {
@@ -226,7 +225,7 @@ mod tests {
     #[test]
     fn insert_matching_term_annotated_as_unlock() {
         // lock 's'; insert 's','v'; 0 — Insert with t1 == lock term is annotated
-        // as an unlock (HS Locks.hs:45-48) AND recursion continues into the body.
+        // as an unlock (HS Locks.hs) AND recursion continues into the body.
         let p = lock(
             pub_const("s"),
             Process::Action(
@@ -246,11 +245,11 @@ mod tests {
     }
 
     /// `WFRep` and `WFPar` are different tags upstream (`prettyWFLockTag`,
-    /// Sapic/Exceptions.hs:32-34). They select different wording in the
+    /// Sapic/Exceptions.hs). They select different wording in the
     /// `ProcessNotWellformed` error that upstream throws. The two arms must
     /// therefore not collapse into one error. A lock whose scope stays open is
-    /// the only way to reach either tag. The public entry point must refuse
-    /// the process in both cases.
+    /// the only way to reach either tag. `annotate_locks` must refuse the
+    /// process in both cases.
     #[test]
     fn parallel_and_replication_below_lock_error_distinctly() {
         // lock 's'; ( 0 | 0 )  — WFPar

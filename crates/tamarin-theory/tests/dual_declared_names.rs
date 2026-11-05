@@ -1,20 +1,19 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Byte-pins the resolution of a DUAL-DECLARED name — one that is BOTH a
 //! `NoEq` funsym of the full signature (user-declared or theory-contributed)
 //! AND a user-declared `[AC]` symbol.
 //!
 //! HS resolves the prefix and `op{a}b` spellings of such a name through
-//! `lookupArity` (Theory/Text/Parser/Term.hs:62-72), a list lookup over
+//! `lookupArity` (Theory/Text/Parser/Term.hs), a list lookup over
 //! `S.toList (userDefinedFunSyms maudeSig)` in which every `NoEqUser` sorts
 //! before every `ACfctUser` (constructor order of `UserDefinedSym`,
-//! Term/Term/FunctionSymbols.hs:146-147) — so the `NoEq` symbol wins those
+//! Term/Term/FunctionSymbols.hs) — so the `NoEq` symbol wins those
 //! spellings.  The INFIX spelling bypasses `lookupArity` entirely: `acterm`
-//! (Theory/Text/Parser/Term.hs:166-172) builds `fAppACfct` straight from
+//! (Theory/Text/Parser/Term.hs) builds `fAppACfct` straight from
 //! `stACFunSyms`, so it stays the AC symbol.  `nullaryApp`
-//! (Theory/Text/Parser/Term.hs:158-163) still resolves a bare
+//! (Theory/Text/Parser/Term.hs) still resolves a bare
 //! nullary name to the `NoEq` constant.
 //!
 //! Expected strings are the pinned oracle's bytes (Git revision ef3f0468)
@@ -29,12 +28,8 @@ use tamarin_theory::pretty_theory::{format_wf_block, web_proto_rules, web_signat
 /// computation, not on term resolution).
 fn rule_echoes(src: &str) -> Vec<String> {
     let thy = parse_theory(src, &[]).expect("parse");
-    // The load pipelines render with the theory's user-function bundle
-    // installed (`set_user_funs_for_theory`), which the canonicalization the
-    // rule printer runs reads through.
-    let _guard = tamarin_theory::elaborate::set_user_funs_for_theory(&thy);
     let elaborated = elaborate(&thy).expect("elaborate");
-    web_proto_rules(&thy, &elaborated)
+    web_proto_rules(&elaborated)
         .into_iter()
         .map(|rule| match rule.split_once("\n\n  /*") {
             Some((echo, _annotation)) => echo.to_string(),
@@ -48,8 +43,7 @@ fn rule_echoes(src: &str) -> Vec<String> {
 fn wf_block(src: &str) -> Option<String> {
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = elaborate(&thy).expect("elaborate");
-    let errs =
-        tamarin_theory::formula_reports::formula_reports(&thy, &elaborated.signature.maude_sig);
+    let errs = tamarin_theory::wellformedness::formulas::formula_reports(&elaborated);
     if errs.is_empty() {
         return None;
     }
@@ -107,7 +101,7 @@ fn prefix_resolves_noeq_while_infix_stays_ac() {
 }
 
 /// `f{a}b` goes through the same `lookupArity` NoEq-first lookup
-/// (`binaryAlgApp`, Theory/Text/Parser/Term.hs:108-121): NoEq for a dual
+/// (`binaryAlgApp`, Theory/Text/Parser/Term.hs): NoEq for a dual
 /// name.  Oracle bytes: probe `p_algapp2`.
 #[test]
 fn algapp_resolves_noeq_for_a_dual_name() {
@@ -138,7 +132,7 @@ fn algapp_stays_ac_without_a_noeq_collision() {
 }
 
 /// A bare nullary dual name resolves to the NoEq constant (`nullaryApp`,
-/// Theory/Text/Parser/Term.hs:158-163).  Oracle bytes: probe
+/// Theory/Text/Parser/Term.hs).  Oracle bytes: probe
 /// `p_nullary_rule`.
 #[test]
 fn a_bare_nullary_dual_name_stays_the_noeq_constant() {
@@ -155,7 +149,7 @@ fn a_bare_nullary_dual_name_stays_the_noeq_constant() {
 
 /// Under `builtins: diffie-hellman` the theory-contributed NoEq `exp/2` wins
 /// the prefix spelling of a dual-declared `exp`, and the resolved symbol IS
-/// `expSym`, so HS `prettyTerm` renders it `'a'^'b'` (Term/Term.hs:310); the
+/// `expSym`, so HS `prettyTerm` renders it `'a'^'b'` (Term/Term.hs); the
 /// infix spelling stays the AC symbol.  Oracle bytes: probes `probe2` (exp-ac)
 /// and `p_exp_infix`.
 #[test]
@@ -235,7 +229,7 @@ fn formula_terms_classifies_the_infix_chain_as_the_ac_symbol() {
 }
 
 /// Under DH the resolved NoEq `exp` is REDUCIBLE (`dhReducibleFunSig`,
-/// Term/Term/FunctionSymbols.hs:307-308), so every prefix/`^` use is flagged,
+/// Term/Term/FunctionSymbols.hs), so every prefix/`^` use is flagged,
 /// rendered prefix, unflattened and unsorted.  Oracle bytes: probe
 /// `exp_ac_prefix`.
 #[test]
@@ -277,7 +271,7 @@ fn an_equation_over_the_dual_name_registers_under_the_noeq_symbol() {
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = elaborate(&thy).expect("elaborate");
     assert_eq!(
-        web_signature_block(&elaborated.signature.maude_sig),
+        web_signature_block(&elaborated.signature),
         "functions: f/2, fst/1, pair/2, snd/1, f/2 [AC]\n\
          equations: f(x, y) = x, fst(<x.1, x.2>) = x.1, snd(<x.1, x.2>) = x.2"
     );

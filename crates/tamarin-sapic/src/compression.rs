@@ -1,13 +1,12 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Sapic.Compression` (`lib/sapic/src/Sapic/Compression.hs`).
 //!
 //! Path compression: merge adjacent "silent" SAPIC rules (rules that do not
 //! perform observable actions) along the state-fact flow, starting from the
 //! initial `State_( )` fact.  Gated on `_transProgress` in HS
-//! (`sapic/src/Sapic.hs:45-101, see line 72`).
+//! (`sapic/src/Sapic.hs`).
 //!
 //! Operates on the final `Rule<ProtoRuleEInfo>` list (post-`toRule`).  HS uses
 //! `S.Set (Rule ProtoRuleEInfo)` in `mergeRules` and `S.Set (Fact LNTerm)` for
@@ -17,9 +16,10 @@
 use std::collections::BTreeSet;
 
 use tamarin_theory::fact::{FactTag, LNFact, Multiplicity};
-use tamarin_theory::rule::{ProtoRuleEInfo, ProtoRuleName, Rule, RuleAttributes};
+use tamarin_theory::rule::{ProtoRuleEInfo, Rule};
 
 use crate::base_translation::list_union;
+use crate::facts::{is_let_fact, is_lock_fact, is_out_fact, is_state_fact};
 
 type ERule = Rule<ProtoRuleEInfo>;
 
@@ -27,7 +27,7 @@ const NO_COMPRESS_KEYWORDS: &[&str] = &[
     "IsIn", "IsNotSet", "Insert", "Delete", "Lock", "Unlock", "Progress",
 ];
 
-/// `isSapicNoCompress` (Compression.hs:32-35).
+/// `isSapicNoCompress` (Compression.hs).
 fn is_sapic_no_compress(f: &LNFact) -> bool {
     if let FactTag::Proto(_, name, _) = &f.tag {
         NO_COMPRESS_KEYWORDS.iter().any(|kw| name.starts_with(kw))
@@ -36,49 +36,12 @@ fn is_sapic_no_compress(f: &LNFact) -> bool {
     }
 }
 
-/// `isStateFact` (Facts.hs:291-295): name starts with `State` or `Semistate`.
-fn is_state_fact(f: &LNFact) -> bool {
-    if let FactTag::Proto(_, name, _) = &f.tag {
-        name.starts_with("State") || name.starts_with("Semistate")
-    } else {
-        false
-    }
-}
-
-/// `isLetFact` (Facts.hs:286-289): name starts with `Let`.
-fn is_let_fact(f: &LNFact) -> bool {
-    if let FactTag::Proto(_, name, _) = &f.tag {
-        name.starts_with("Let")
-    } else {
-        false
-    }
-}
-
-/// `isLockFact` (Facts.hs:297-300): name starts with `L_CellLocked`.
-fn is_lock_fact(f: &LNFact) -> bool {
-    if let FactTag::Proto(_, name, _) = &f.tag {
-        name.starts_with("L_CellLocked")
-    } else {
-        false
-    }
-}
-
-/// `isOutFact` (Facts.hs:278-280).
-fn is_out_fact(f: &LNFact) -> bool {
-    matches!(f.tag, FactTag::Out)
-}
-
-/// `isPersistentFact`: a persistent-multiplicity fact.
-fn is_persistent_fact(f: &LNFact) -> bool {
-    matches!(&f.tag, FactTag::Proto(Multiplicity::Persistent, _, _))
-}
-
-/// `isStateProcessFact f = isStateFact f || isLetFact f` (Compression.hs:37-38).
+/// `isStateProcessFact f = isStateFact f || isLetFact f` (Compression.hs).
 fn is_state_process_fact(f: &LNFact) -> bool {
     is_state_fact(f) || is_let_fact(f)
 }
 
-/// `sameName` (Compression.hs:40-42): both are proto facts with the same name.
+/// `sameName` (Compression.hs): both are proto facts with the same name.
 fn same_name(a: &LNFact, b: &LNFact) -> bool {
     match (&a.tag, &b.tag) {
         (FactTag::Proto(_, n1, _), FactTag::Proto(_, n2, _)) => n1 == n2,
@@ -86,21 +49,21 @@ fn same_name(a: &LNFact, b: &LNFact) -> bool {
     }
 }
 
-/// `List.partition (List.any (sameName fact) . _rPrems)` (Compression.hs:45-46).
+/// `List.partition (List.any (sameName fact) . _rPrems)` (Compression.hs).
 fn get_prem_rules(fact: &LNFact, rules: Vec<ERule>) -> (Vec<ERule>, Vec<ERule>) {
     rules
         .into_iter()
         .partition(|r| r.premises.iter().any(|f| same_name(fact, f)))
 }
 
-/// `getConcsRules` (Compression.hs:49-50): partition on conclusions.
+/// `getConcsRules` (Compression.hs): partition on conclusions.
 fn get_concs_rules(fact: &LNFact, rules: Vec<ERule>) -> (Vec<ERule>, Vec<ERule>) {
     rules
         .into_iter()
         .partition(|r| r.conclusions.iter().any(|f| same_name(fact, f)))
 }
 
-/// `getProducedFacts` (Compression.hs:53-58): all state-process facts in the
+/// `getProducedFacts` (Compression.hs): all state-process facts in the
 /// conclusions of the given rules.
 fn get_produced_facts(rules: &[ERule]) -> BTreeSet<LNFact> {
     let mut out = BTreeSet::new();
@@ -114,10 +77,10 @@ fn get_produced_facts(rules: &[ERule]) -> BTreeSet<LNFact> {
     out
 }
 
-/// `mergeInfo` (Compression.hs:60-68): keep the FIRST rule's name (`mergeStand
+/// `mergeInfo` (Compression.hs): keep the FIRST rule's name (`mergeStand
 /// n _ = n`), merge attrs, concatenate restrictions.
 ///
-/// `mergeAttrs a a' = a <> a'` (Compression.hs:60-68, see line 67):
+/// `mergeAttrs a a' = a <> a'` (Compression.hs):
 /// `RuleAttributes::merge` is right-precedence (`other.x.or(self.x)`), matching
 /// HS `a <> a'`; for two rules of the same source process the result is the
 /// same either way.
@@ -133,7 +96,7 @@ fn merge_info(i1: &ProtoRuleEInfo, i2: &ProtoRuleEInfo) -> ProtoRuleEInfo {
     }
 }
 
-/// `canMerge compEvents r1 r2` (Compression.hs:71-84).
+/// `canMerge compEvents r1 r2` (Compression.hs).
 fn can_merge(comp_events: bool, r1: &ERule, r2: &ERule) -> bool {
     let ract = &r1.actions;
     let rconc = &r1.conclusions;
@@ -167,7 +130,7 @@ fn can_merge(comp_events: bool, r1: &ERule, r2: &ERule) -> bool {
     true
 }
 
-/// `merge compEvents rule1 rule2 ruleset` (Compression.hs:87-96).
+/// `merge compEvents rule1 rule2 ruleset` (Compression.hs).
 fn merge(comp_events: bool, rule1: &ERule, rule2: &ERule, ruleset: &mut Vec<ERule>) {
     if can_merge(comp_events, rule1, rule2) {
         // `newprem = rprem ++ filter (`notElem` rconc) rprem2`
@@ -202,7 +165,7 @@ fn merge(comp_events: bool, rule1: &ERule, rule2: &ERule, ruleset: &mut Vec<ERul
     }
 }
 
-/// `mergeRules compEvents leftrules rightrules` (Compression.hs:99-105).
+/// `mergeRules compEvents leftrules rightrules` (Compression.hs).
 fn merge_rules(comp_events: bool, leftrules: &[ERule], rightrules: &[ERule]) -> Vec<ERule> {
     if leftrules.len() == 1 && rightrules.len() == 1 {
         // `foldl (\set l -> foldl (flip (merge l)) set rightrules) S.empty leftrules`,
@@ -221,17 +184,18 @@ fn merge_rules(comp_events: bool, leftrules: &[ERule], rightrules: &[ERule]) -> 
     }
 }
 
-/// `compressOne compEvents fact msr` (Compression.hs:111-118).
+/// `compressOne compEvents fact msr` (Compression.hs).
 fn compress_one(
     comp_events: bool,
     fact: &LNFact,
     msr: Vec<ERule>,
 ) -> (Vec<ERule>, BTreeSet<LNFact>) {
-    // HS `compressOne` (Compression.hs:111-118): the `where`-bound `new_rules` /
+    // HS `compressOne` (Compression.hs): the `where`-bound `new_rules` /
     // `new_facts` are SHARED across both guards — the persistent case returns the
     // UNCOMPRESSED `msr` but STILL computes `new_facts` from the merge of the
     // fact's prem/concs rules (NOT `getProducedFacts msr`).
-    let persistent = is_persistent_fact(fact);
+    // `isPersistentFact` (Theory/Model/Fact.hs).
+    let persistent = fact.is_persistent();
     if persistent {
         // Compute `new_facts` from the merge, but return the ORIGINAL `msr`
         // unchanged — so partition a CLONE with the same prem/concs helpers the
@@ -252,35 +216,16 @@ fn compress_one(
     (out, new_facts)
 }
 
-/// `compress compEvents (fact:remainder) compressed_facts msr` (Compression.hs:121-129).
+/// `compress compEvents (fact:remainder) compressed_facts msr` (Compression.hs).
 fn compress(
     comp_events: bool,
     mut worklist: Vec<LNFact>,
     mut compressed_facts: BTreeSet<LNFact>,
     mut msr: Vec<ERule>,
 ) -> Vec<ERule> {
-    let dbg = tamarin_utils::env_gate!("TAM_COMPRESS_DBG");
     while !worklist.is_empty() {
         let fact = worklist.remove(0);
         let remainder = worklist; // the tail
-        if dbg {
-            eprintln!(
-                "[compress] fact={} | msr=[{}] | worklist_tail=[{}]",
-                tamarin_theory::fact::fact_tag_name(&fact.tag),
-                msr.iter()
-                    .map(|r| match &r.info.name {
-                        ProtoRuleName::Stand(n) => n.to_string(),
-                        _ => "?".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                remainder
-                    .iter()
-                    .map(|f| tamarin_theory::fact::fact_tag_name(&f.tag))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
         let (new_msr, new_facts) = compress_one(comp_events, &fact, msr);
         msr = new_msr;
         compressed_facts.insert(fact.clone());
@@ -298,11 +243,11 @@ fn compress(
     msr
 }
 
-/// `pathCompression compEvents msr` (Compression.hs:133-140).
+/// `pathCompression compEvents msr` (Compression.hs).
 ///
 /// Starts from the initial `State_( )` fact and removes dangling rules (those
 /// with no actions AND no conclusions).
-pub fn path_compression(comp_events: bool, msr: Vec<ERule>) -> Vec<ERule> {
+pub(crate) fn path_compression(comp_events: bool, msr: Vec<ERule>) -> Vec<ERule> {
     // `initfact = factToFact (State LState [] S.empty)` = `State_( )`, arity 0.
     let initfact: LNFact = LNFact::new(FactTag::Proto(Multiplicity::Linear, "State_", 0), vec![]);
     let compressed = compress(comp_events, vec![initfact], BTreeSet::new(), msr);
@@ -338,33 +283,78 @@ fn cmp_rule(a: &ERule, b: &ERule) -> std::cmp::Ordering {
 }
 
 fn cmp_info(a: &ProtoRuleEInfo, b: &ProtoRuleEInfo) -> std::cmp::Ordering {
-    // `ProtoRuleEInfo` Ord = (name, attributes, restrictions).  The SAPIC rules
-    // reaching compression carry NO `info.restrictions` (the per-rule `_restrict`
-    // formulas live in `AnnotatedRule.restr`, lifted separately), so comparing by
-    // length is a faithful proxy — `SyntacticLNFormula` has no `Ord` and the
-    // non-empty case never arises here.
+    // `ProtoRuleEInfo` Ord = (name, attributes, restrictions).  The attributes
+    // compare through `Ord RuleAttributes`, which walks HS's own field chain
+    // (Theory/Model/Rule.hs) and reads the whole process.  The SAPIC
+    // rules reaching compression carry NO `info.restrictions` (the per-rule
+    // `_restrict` formulas live in `AnnotatedRule.restr`, lifted separately), so
+    // comparing by length is a faithful proxy — `SyntacticLNFormula` has no
+    // `Ord` and the non-empty case never arises here.
     a.name
         .cmp(&b.name)
-        .then_with(|| cmp_attrs(&a.attributes, &b.attributes))
+        .then_with(|| a.attributes.cmp(&b.attributes))
         .then_with(|| a.restrictions.len().cmp(&b.restrictions.len()))
 }
 
-/// `Ord RuleAttributes` = `(ruleColor, ruleProcess, ignoreDerivChecks,
-/// isSAPiCRule, role)`.  Color compared by rendered hex (a total order), process
-/// by its top-level rendering.
-fn cmp_attrs(a: &RuleAttributes, b: &RuleAttributes) -> std::cmp::Ordering {
-    use tamarin_theory::pretty_sapic::pretty_sapic_top_level_attr;
-    let color_key = |c: &Option<tamarin_utils::color::Rgb>| {
-        c.as_ref().map(|c| tamarin_utils::color::rgb_to_hex(*c))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tamarin_term::lterm::{LSort, LVar};
+    use tamarin_theory::sapic::{
+        PlainProcess, Process, ProcessParsedAnnotation, SapicAction, SapicLVar, SharedProcess,
     };
-    color_key(&a.color)
-        .cmp(&color_key(&b.color))
-        .then_with(|| {
-            let pa = a.process.as_ref().map(pretty_sapic_top_level_attr);
-            let pb = b.process.as_ref().map(pretty_sapic_top_level_attr);
-            pa.cmp(&pb)
-        })
-        .then_with(|| a.ignore_deriv_checks.cmp(&b.ignore_deriv_checks))
-        .then_with(|| a.is_sapic_rule.cmp(&b.is_sapic_rule))
-        .then_with(|| a.role.cmp(&b.role))
+
+    fn new_action(name: &str, rest: PlainProcess) -> PlainProcess {
+        Process::Action(
+            SapicAction::New(SapicLVar::untyped(LVar::new(name, LSort::Msg, 0))),
+            ProcessParsedAnnotation::empty(),
+            Box::new(rest),
+        )
+    }
+
+    fn rule_with_process(name: &str, p: PlainProcess) -> ERule {
+        let mut info = ProtoRuleEInfo::standard(name);
+        info.attributes.is_sapic_rule = true;
+        info.attributes.process = Some(Arc::new(SharedProcess::new(p)));
+        Rule::new(info, Vec::new(), Vec::new(), Vec::new())
+    }
+
+    /// `set_insert` dedups like HS's `S.Set (Rule ProtoRuleEInfo)`, so two
+    /// rules whose processes differ only BELOW the top node are two elements:
+    /// HS's `Ord RuleAttributes` (Theory/Model/Rule.hs) compares the
+    /// whole process (Theory/Sapic/Process.hs).  A key reading the top node
+    /// alone ties them, and the second rule is then dropped.
+    #[test]
+    fn set_insert_keeps_rules_whose_processes_differ_below_the_top_node() {
+        let null = Process::Null(ProcessParsedAnnotation::empty());
+        let shallow = new_action("x", null.clone());
+        let deep = new_action("x", new_action("y", null));
+        let mut set = Vec::new();
+        set_insert(&mut set, rule_with_process("R", shallow));
+        set_insert(&mut set, rule_with_process("R", deep));
+        assert_eq!(set.len(), 2);
+    }
+
+    /// `cmp_info` walks HS's `(name, attributes, restrictions)`: the name
+    /// outranks the attributes, and a rule with no process sorts before one
+    /// that has one.
+    #[test]
+    fn cmp_info_compares_the_name_before_the_attributes() {
+        let null = Process::Null(ProcessParsedAnnotation::empty());
+        let with_process = rule_with_process("A", null);
+        let mut bare = ProtoRuleEInfo::standard("B");
+        bare.attributes.is_sapic_rule = true;
+        assert_eq!(
+            cmp_info(&with_process.info, &bare),
+            std::cmp::Ordering::Less,
+            "the name decides before the attributes"
+        );
+        let no_process = ProtoRuleEInfo::standard("A");
+        assert_eq!(
+            cmp_info(&no_process, &with_process.info),
+            std::cmp::Ordering::Less,
+            "no process ranks before some process"
+        );
+    }
 }

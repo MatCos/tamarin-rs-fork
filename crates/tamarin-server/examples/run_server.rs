@@ -28,33 +28,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
-    let first_dir = |candidates: [&str; 2]| {
-        candidates
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_dir())
-    };
-    let data_dir = first_dir(["data", "../data"]).unwrap_or_else(|| PathBuf::from("../data"));
-    let frontend_dist = first_dir(["frontend/dist", "../frontend/dist"]);
-    let maude_path = [
-        "/usr/local/bin/maude",
-        "/opt/homebrew/bin/maude",
-        "/usr/bin/maude",
-    ]
-    .iter()
-    .find(|p| std::path::Path::new(p).exists())
-    .map(|s| s.to_string())
-    .unwrap_or_else(|| "maude".into());
+    let maude_path = tamarin_test_support::maude_path().unwrap_or_else(|| "maude".into());
 
     let cfg = tamarin_server::ServerConfig {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], port)),
-        data_dir,
-        frontend_dist,
+        data_dir: None,
+        frontend_dist: None,
         maude_path,
         derivcheck_timeout: 5,
+        solver_parameters: Default::default(),
         stop_on_trace: None,
         dot_path: "dot".to_string(),
         json_path: None,
+        auto_sources: false,
+        ndc_check: true,
+        lemmas_to_prove: Vec::new(),
+        parser_flags: Vec::new(),
         heuristic: Default::default(),
         maude_processes: 4,
     };

@@ -1,17 +1,16 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
-//! End-to-end stderr / exit-code parity for the duplicate-rule guards.
+//! End-to-end diagnostics and exit codes for duplicate-rule guards.
 //!
-//! Parse time: `liftedAddProtoRule` (Theory/Text/Parser.hs:175-193) rejects a
+//! Parse time: `liftedAddProtoRule` (Theory/Text/Parser.hs) rejects a
 //! second, DIFFERENT rule under an existing name via `addOpenProtoRule`
-//! (OpenTheory.hs:691-702); batch mode's `handleError` `die`s on the
-//! resulting `ParserError` (Main/Mode/Batch.hs:235) — parsec frame on stderr,
-//! exit 1, no stdout.  An identical duplicate is accepted and appended again.
+//! (OpenTheory.hs); batch mode's `handleError` `die`s on the
+//! resulting parser error. The port renders a semantic diagnostic on stderr
+//! and exits 1. An identical duplicate is accepted and appended again.
 //!
 //! Translate time: SAPIC's `translate` folds its generated rules through the
-//! same guard (`foldM liftedAddProtoRule`, lib/sapic/src/Sapic.hs:75), so a user rule named
+//! same guard (`foldM liftedAddProtoRule`, lib/sapic/src/Sapic.hs), so a user rule named
 //! like a generated one (`rule Init` alongside a `process:`) aborts AFTER the
 //! `Theory translated` marker.  In HS the thrown `DuplicateItem` escapes to
 //! GHC's runtime: the pinned oracle (Git revision ef3f0468) prints exactly
@@ -19,7 +18,7 @@
 //!
 //! The oracle emits the `maude tool:` banner and the `[Theory X] …` markers
 //! on stderr even under `--quiet` (the flag is registered but never read —
-//! TheoryLoader.hs:159-163, 414-416).  Expectations below are its `--quiet`
+//! TheoryLoader.hs).  Expectations below are its `--quiet`
 //! stderr minus the three banner lines, whose maude path and version are
 //! machine-local.
 
@@ -37,10 +36,10 @@ fn run_binary(stem: &str, src: &str) -> (i32, String, String) {
     (code, stdout, strip_maude_banner(&stderr))
 }
 
-/// Two different rules under one name: the parsec frame `die` prints — the
-/// `SourcePos` name is the input path, so only the frame's tail is portable.
+/// Two different rules under one name produce the structured conflict
+/// diagnostic.
 #[test]
-fn duplicate_rule_prints_the_parsec_frame_and_exits_1() {
+fn duplicate_rule_prints_a_diagnostic_and_exits_1() {
     if !maude_available() {
         eprintln!("skipping: maude not on path");
         return;
@@ -53,14 +52,12 @@ fn duplicate_rule_prints_the_parsec_frame_and_exits_1() {
          end\n",
     );
     assert_eq!(code, 1);
-    assert!(
-        stderr.ends_with(
-            "dup.spthy\" (line 6, column 1):\n\
-             unexpected \"e\"\n\
-             expecting \"variants\"\n\
-             duplicate rule: R1\n"
-        ),
-        "unexpected stderr:\n{stderr}"
+    common::assert_diagnostic(
+        &stderr,
+        &[
+            "error: Conflicting rule",
+            "`R1` was already declared incompatibly",
+        ],
     );
 }
 

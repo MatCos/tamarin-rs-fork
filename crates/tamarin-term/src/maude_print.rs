@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Term.Maude.Parser`'s pretty-printing portion (Maude module
 //! emission and term formatting). The parsing portion lives in
@@ -66,14 +65,14 @@ pub const FUN_SYM_PREFIX: &str = "tam";
 /// Number of attribute characters between the `tam` prefix and the user-given
 /// name: `fun_sym_encode_attr` emits exactly this many, `fun_sym_decode`
 /// splits at the same width, and `maude_parse::is_ac_fct_ident` classifies on
-/// it (HS `funSymDecode`'s `BC.splitAt 4`, Maude/Parser.hs:92-105).
+/// it (HS `funSymDecode`'s `BC.splitAt 4`, Maude/Parser.hs).
 pub(crate) const ATTR_BLOCK_LEN: usize = 4;
 
 /// Encode privacy / constructability / AC-ness / NDC state into the
 /// `ATTR_BLOCK_LEN`-char prefix that follows `tam` for each user-defined
 /// symbol.
 ///
-/// HS `funSymEncodeAttr` (Maude/Parser.hs:76-88) concatenates one char per
+/// HS `funSymEncodeAttr` (Maude/Parser.hs) concatenates one char per
 /// attribute: `Private`->`P` / `Public`->`X`, `Constructor`->`C` /
 /// `Destructor`->`D`, `IsAC`->`A` / `NotAC`->`F`, and `IsNDC`->`N` /
 /// `NotNDC`->`U` / `IsNDCDiff`->`D` / `IsNDCBoth`->`B`.  All 32
@@ -130,7 +129,7 @@ pub fn fun_sym_encode_attr(
 /// `(name, p, c, ndc)`.  `prefix == "tam"` plus the attribute chars
 /// (see [`fun_sym_encode_attr`]) followed by the user-given name.
 ///
-/// HS `funSymDecode` (Maude/Parser.hs:92-105) reads the privacy from char 0, the
+/// HS `funSymDecode` (Maude/Parser.hs) reads the privacy from char 0, the
 /// constructability from char 1 and the NDC state from char 3 — char 2 (the
 /// AC state) is not decoded, because the caller already knows from the
 /// identifier's shape which of `fAppNoEq`/`fAppACfct` it is building.
@@ -222,6 +221,17 @@ fn pp_maude_c_sym_into(c: CSym, buf: &mut Vec<u8>) {
     }
 }
 
+/// Append the wire identifier for a signature-defined free or AC symbol.
+/// Built-in AC/C/List symbols are dispatched separately by the reply parser.
+pub(crate) fn pp_maude_sig_sym_into(sym: FunSym, buf: &mut Vec<u8>) -> bool {
+    match sym {
+        FunSym::NoEq(sym) => pp_maude_no_eq_sym_into(&sym, buf),
+        FunSym::Ac(AcSym::AcFct(sym)) => pp_maude_ac_sym_into(AcSym::AcFct(sym), buf),
+        _ => return false,
+    }
+    true
+}
+
 // =============================================================================
 // Term pretty printing
 // =============================================================================
@@ -238,24 +248,28 @@ pub fn pp_mterm(t: &Term<MaudeLit>) -> Vec<u8> {
 /// would require.  Byte-identical to `pp_mterm(&Term::App(FunSym::List, items))`.
 pub fn pp_mterm_list(items: &[Term<MaudeLit>]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(b"list(");
-    pp_list(items, &mut buf);
-    buf.push(b')');
+    pp_mterm_list_into(items, &mut buf);
     buf
 }
 
-fn pp_mterm_into(t: &Term<MaudeLit>, buf: &mut Vec<u8>) {
+pub(crate) fn pp_mterm_list_into(items: &[Term<MaudeLit>], buf: &mut Vec<u8>) {
+    buf.extend_from_slice(b"list(");
+    pp_list(items, buf);
+    buf.push(b')');
+}
+
+pub(crate) fn pp_mterm_into(t: &Term<MaudeLit>, buf: &mut Vec<u8>) {
     match t {
         Term::Lit(MaudeLit::MaudeVar(i, sort)) => {
             buf.push(b'x');
-            buf.extend(i.to_string().as_bytes());
+            push_u64(*i, buf);
             buf.push(b':');
             buf.extend(pp_lsort(*sort).as_bytes());
         }
         Term::Lit(MaudeLit::MaudeConst(i, sort)) => {
             buf.extend(pp_lsort_sym(*sort).as_bytes());
             buf.push(b'(');
-            buf.extend(i.to_string().as_bytes());
+            push_u64(*i, buf);
             buf.push(b')');
         }
         Term::Lit(MaudeLit::FreshVar(_, _)) => {
@@ -286,6 +300,20 @@ fn pp_mterm_into(t: &Term<MaudeLit>, buf: &mut Vec<u8>) {
     }
 }
 
+fn push_u64(mut value: u64, buf: &mut Vec<u8>) {
+    let mut digits = [0; 20];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            buf.extend_from_slice(&digits[start..]);
+            return;
+        }
+    }
+}
+
 fn pp_args(args: &[Term<MaudeLit>], buf: &mut Vec<u8>) {
     buf.push(b'(');
     for (i, a) in args.iter().enumerate() {
@@ -298,15 +326,13 @@ fn pp_args(args: &[Term<MaudeLit>], buf: &mut Vec<u8>) {
 }
 
 fn pp_list(args: &[Term<MaudeLit>], buf: &mut Vec<u8>) {
-    if args.is_empty() {
-        buf.extend_from_slice(b"nil");
-        return;
+    for arg in args {
+        buf.extend_from_slice(b"cons(");
+        pp_mterm_into(arg, buf);
+        buf.push(b',');
     }
-    buf.extend_from_slice(b"cons(");
-    pp_mterm_into(&args[0], buf);
-    buf.push(b',');
-    pp_list(&args[1..], buf);
-    buf.push(b')');
+    buf.extend_from_slice(b"nil");
+    buf.extend(std::iter::repeat_n(b')', args.len()));
 }
 
 // =============================================================================
@@ -348,7 +374,7 @@ pub fn pp_theory(msig: &MaudeSig) -> String {
     }
     if msig.enable_dh {
         op_eq(&mut out, "one", "-> Msg");
-        // HS `theoryOpEq "DH-neutral  : -> Msg"` (Maude/Parser.hs:223) has TWO
+        // HS `theoryOpEq "DH-neutral  : -> Msg"` (Maude/Parser.hs) has TWO
         // spaces before the colon; the trailing space on the name reproduces
         // that so `format!("{} : {}")` yields `DH-neutral  : -> Msg`.
         op_eq(&mut out, "DH-neutral ", "-> Msg");
@@ -373,7 +399,7 @@ pub fn pp_theory(msig: &MaudeSig) -> String {
     // in `NoEqSym`-`Ord` order.
     for sym in &msig.st_fun_syms {
         let args = "Msg ".repeat(sym.arity);
-        // Match HS `theoryFunSym` (Maude/Parser.hs:264-265) byte-for-byte:
+        // Match HS `theoryFunSym` (Maude/Parser.hs) byte-for-byte:
         // `replaceUnderscore s <> " : " <> (concat $ replicate ar "Msg ") <> " -> Msg"`.
         // `args` already ends in a trailing space (or is empty), and the
         // literal " -> Msg" has a leading space, so there are two spaces
@@ -395,7 +421,7 @@ pub fn pp_theory(msig: &MaudeSig) -> String {
     // AC for them.  `st_ac_fun_syms` is a `BTreeSet`, so iterating it directly
     // yields `AcFctSym`-`Ord` order (HS `S.toList $ stACFunSyms msig`).
     for sym in &msig.st_ac_fun_syms {
-        // Match HS `theoryACFunSym` (Maude/Parser.hs:266-267) byte-for-byte:
+        // Match HS `theoryACFunSym` (Maude/Parser.hs) byte-for-byte:
         // `replaceUnderscore s <> " : " <> (concat $ replicate 2 "Msg ") <> "-> Msg"
         //  <> " [comm assoc]"`.  Unlike `theoryFunSym` above, the sort part has
         // no extra space before `->`, so the line reads
@@ -419,7 +445,7 @@ pub fn pp_theory(msig: &MaudeSig) -> String {
 }
 
 /// Emit the `  op tam<attrs><name>` head shared by the user-defined free and
-/// AC declarations — HS `theoryOp` and `theoryOpACUser` (Maude/Parser.hs:257-260)
+/// AC declarations — HS `theoryOp` and `theoryOpACUser` (Maude/Parser.hs)
 /// are the same `"  op " <> funSymPrefix <> attrs <> fsort <> " ."` string.
 /// The caller appends the `fsort` tail and the trailing ` .\n`.
 ///
@@ -445,7 +471,7 @@ fn op_user_head(
 
 fn op_eq(out: &mut String, name: &str, sort: &str) {
     // HS `theoryOpEq = theoryOp (Just (Public,Constructor,NotAC,NotNDC))`
-    // (Maude/Parser.hs:261).
+    // (Maude/Parser.hs).
     op(
         out,
         Privacy::Public,
@@ -502,15 +528,30 @@ mod tests {
     use crate::maude_sig::{bp_maude_sig, dh_maude_sig, pair_maude_sig};
 
     #[test]
+    fn term_writer_handles_full_width_ids_and_lists() {
+        let items = [
+            Term::Lit(MaudeLit::MaudeVar(u64::MAX, LSort::Msg)),
+            Term::Lit(MaudeLit::MaudeConst(0, LSort::Fresh)),
+        ];
+        let mut appended = b"prefix:".to_vec();
+        pp_mterm_list_into(&items, &mut appended);
+        assert_eq!(
+            appended,
+            b"prefix:list(cons(x18446744073709551615:Msg,cons(f(0),nil)))"
+        );
+        assert_eq!(pp_mterm_list(&items), &appended[b"prefix:".len()..]);
+    }
+
+    #[test]
     fn dh_neutral_op_has_two_spaces_before_colon() {
-        // HS `theoryOpEq "DH-neutral  : -> Msg"` (Maude/Parser.hs:223) emits TWO
+        // HS `theoryOpEq "DH-neutral  : -> Msg"` (Maude/Parser.hs) emits TWO
         // spaces before the colon; the emitted module must match byte-for-byte.
         let s = pp_theory(&dh_maude_sig());
         assert!(s.contains("op tamXCFUDH-neutral  : -> Msg ."));
     }
 
     /// The complete module that the port sends to Maude for the pairing
-    /// signature, byte for byte.  HS `ppTheory` (Maude/Parser.hs:176-253)
+    /// signature, byte for byte.  HS `ppTheory` (Maude/Parser.hs)
     /// supplies every line.  The module starts with the fixed preamble.  It
     /// leaves out the sort, subsort and `op t` lines that `enable_nat` gates.
     /// The line `op nil  : -> TOP .` keeps its two spaces.  The `stFunSyms`
@@ -550,18 +591,18 @@ mod tests {
     /// The DH module that the port sends to Maude, byte for byte, as captured
     /// from the pinned oracle.  `DEBUG_MAUDE=1 tamarin-prover dh.spthy` writes
     /// a copy of the module that Maude reads to `/tmp/maude.input`
-    /// (Maude/Process.hs:116-126).  `dh.spthy` declares only
+    /// (Maude/Process.hs).  `dh.spthy` declares only
     /// `builtins: diffie-hellman`.  Its signature is therefore HS
-    /// `dhMaudeSig <> pairMaudeSig` (Maude/Signature.hs:201), which is what
+    /// `dhMaudeSig <> pairMaudeSig` (Maude/Signature.hs), which is what
     /// the merge below builds.
     ///
     /// A count of the rules cannot check the details that follow.  The module
-    /// holds five DH `op` lines in HS source order (Maude/Parser.hs:222-226).
+    /// holds five DH `op` lines in HS source order (Maude/Parser.hs).
     /// Among those five, `mult` carries `[comm assoc]` and no attribute
-    /// letters (`theoryOpAC = theoryOp Nothing`, Maude/Parser.hs:262).  The
+    /// letters (`theoryOpAC = theoryOp Nothing`, Maude/Parser.hs).  The
     /// other four carry `XCFU`.  The module also holds all 15 rewrite rules in
     /// `Set`-sorted order.  They are the 13 rules of `dhRules`
-    /// (Builtin/Rules.hs:47-61) plus the two pairing rules.  `ppMaude` renders
+    /// (Builtin/Rules.hs) plus the two pairing rules.  `ppMaude` renders
     /// each rule.  It flattens AC arguments into a single `tammult(..)`
     /// application.  One conversion context per rule numbers both sides of
     /// that rule.  A change to the order, the type or the name of any single
@@ -613,12 +654,12 @@ mod tests {
 
     /// The same oracle capture for a `builtins: bilinear-pairing` theory.  Its
     /// signature is HS `bpMaudeSig <> pairMaudeSig`.  `maudeSig` sets
-    /// `enableDH` whenever `enableBP` is set (Maude/Signature.hs:112).  This
+    /// `enableDH` whenever `enableBP` is set (Maude/Signature.hs).  This
     /// module is therefore the DH module plus two additions.  The first
     /// addition is the two BP `op` lines.  `pmult` is a plain `theoryOpEq`.
     /// `em` is a `theoryOpC` that carries `[comm]` and no attribute letters
-    /// (Maude/Parser.hs:231-232).  The second addition is the three `bpRules`
-    /// (Builtin/Rules.hs:71-78), sorted in among the DH rules.
+    /// (Maude/Parser.hs).  The second addition is the three `bpRules`
+    /// (Builtin/Rules.hs), sorted in among the DH rules.
     #[test]
     fn theory_for_bp_is_the_oracle_module() {
         assert_eq!(
@@ -673,7 +714,7 @@ mod tests {
     /// to the `sort` line.  It adds a `subsort` line and an `op t` constant.
     /// It also adds the `tone` and `tplus` operators.  These lines come from
     /// the four `enableNat` guards of HS `ppTheory`
-    /// (Maude/Parser.hs:181-186, 190-193, 204-207, 240-244).
+    /// (Maude/Parser.hs).
     #[test]
     fn nat_theory_adds_the_tamnat_lines() {
         let s = pp_theory(&crate::maude_sig::nat_maude_sig());
@@ -713,7 +754,7 @@ mod tests {
     }
 
     /// The exact letters of the attribute block (HS `funSymEncodeAttr`,
-    /// Maude/Parser.hs:76-88).  These letters are the ones the port sends to
+    /// Maude/Parser.hs).  These letters are the ones the port sends to
     /// Maude.  The test `every_attribute_quadruple_round_trips_through_decode`
     /// compares the encoder only against its own decoder.  A letter renamed on
     /// both the encode side and the decode side still passes that test.  These
@@ -750,7 +791,7 @@ mod tests {
     /// only surfaces when Maude echoes a symbol back carrying the wrong
     /// privacy / constructability / NDC flags.  The AC slot is not part of
     /// the decoded triple — HS `funSymDecode` reads chars 0/1/3 only
-    /// (Maude/Parser.hs:92-105), because the caller already knows from the
+    /// (Maude/Parser.hs), because the caller already knows from the
     /// identifier's shape which symbol kind it is rebuilding.
     #[test]
     fn every_attribute_quadruple_round_trips_through_decode() {

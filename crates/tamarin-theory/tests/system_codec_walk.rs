@@ -12,22 +12,22 @@
 //! - every ranked method round-trips.
 //!
 //! Only built with the `serde` feature.  Skips without maude only when
-//! `TAM_ALLOW_NO_MAUDE=1` (see `common::maude_path`).
+//! `TAM_ALLOW_NO_MAUDE=1` (see `tamarin_test_support::require_maude_path`).
 
 #![cfg(feature = "serde")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tamarin_theory::constraint::solver::context::{CutStrategy, ProofContext};
+use tamarin_term::maude_proc::MaudeHandle;
+use tamarin_theory::constraint::solver::context::ProofContext;
 use tamarin_theory::constraint::solver::proof_method::{exec_proof_method, ProofMethod};
 use tamarin_theory::constraint::solver::search::ranked_methods;
 use tamarin_theory::constraint::system::System;
-use tamarin_theory::prove::{build_lemma_proof_context, CliHeuristic};
+use tamarin_theory::prove::{ProverSession, ProverSessionOptions};
 use tamarin_theory::system_codec::{
     decode_proof_method, decode_system, encode_proof_method, encode_system,
 };
-
-mod common;
 
 /// Systems checked per lemma, maximum depth, and how many methods per
 /// system have their cases pushed onto the walk.
@@ -35,15 +35,37 @@ const MAX_SYSTEMS: usize = 40;
 const MAX_DEPTH: usize = 4;
 const BRANCHES: usize = 2;
 
+fn ranked(ctx: &ProofContext, sys: &System) -> Vec<ProofMethod> {
+    ranked_methods(sys, ctx, 0).expect("ranked_methods")
+}
+
 fn sorted_cases(
     ctx: &ProofContext,
     m: &ProofMethod,
     sys: &System,
 ) -> Option<Vec<(String, System)>> {
-    exec_proof_method(ctx, m, sys).map(|mut cs| {
-        cs.sort_by(|a, b| a.0.cmp(&b.0));
-        cs
-    })
+    exec_proof_method(ctx, m, sys)
+        .expect("exec_proof_method")
+        .map(|mut cs| {
+            cs.sort_by(|a, b| a.0.cmp(&b.0));
+            cs
+        })
+}
+
+/// Read, parse and elaborate the theory, start maude on its signature and
+/// build a prover session.  `None` when no maude resolves
+/// (`TAM_ALLOW_NO_MAUDE=1`).
+fn session(path: &std::path::Path) -> Option<ProverSession> {
+    let maude_path = tamarin_test_support::require_maude_path()?;
+    let source = std::fs::read_to_string(path).expect("read theory");
+    let parsed = tamarin_parser::parse_theory(&source, &[]).expect("parse theory");
+    let theory = tamarin_theory::elaborate::elaborate(&parsed).expect("elaborate");
+    let maude = MaudeHandle::start(&maude_path, theory.signature.clone())
+        .unwrap_or_else(|e| panic!("maude at {maude_path} failed to start: {e:?}"));
+    Some(
+        ProverSession::build(Arc::new(theory), maude, ProverSessionOptions::default())
+            .expect("build prover session"),
+    )
 }
 
 fn round_trip(sys: &System, at: &str) -> System {
@@ -67,20 +89,12 @@ fn walk(rel_path: &str, lemma: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tamarin-prover/examples")
         .join(rel_path);
-    let Some((parsed, _, maude)) = common::load_theory_with_maude(&path) else {
+    let Some(session) = session(&path) else {
         return;
     };
-    let (ctx, initial, _, _user_funs) = build_lemma_proof_context(
-        &parsed,
-        lemma,
-        maude,
-        None,
-        path.to_str().unwrap(),
-        &CliHeuristic::default(),
-        CutStrategy::Dfs,
-        None,
-    )
-    .unwrap_or_else(|e| panic!("{rel_path} {lemma}: {e:?}"));
+    let (ctx, initial) = session
+        .context_and_system_for_lemma(lemma)
+        .unwrap_or_else(|e| panic!("{rel_path} {lemma}: {e:?}"));
 
     let mut stack = vec![(initial, 0usize, String::new())];
     let mut checked = 0;
@@ -92,9 +106,9 @@ fn walk(rel_path: &str, lemma: &str) {
         let at = format!("{rel_path} {lemma} [{case_path}]");
         let back = round_trip(&sys, &at);
 
-        let methods = ranked_methods(&sys, &ctx, 0);
+        let methods = ranked(&ctx, &sys);
         assert!(
-            ranked_methods(&back, &ctx, 0) == methods,
+            ranked(&ctx, &back) == methods,
             "{at}: ranked methods differ after decode"
         );
         for m in &methods {

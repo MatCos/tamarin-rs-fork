@@ -1,12 +1,10 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Term.LTerm` data types from `lib/term/src/Term/LTerm.hs`:
 //! sorts, names, logical variables, simple predicates and convertors,
-//! the `BVar`/`BLVar`/`BLTerm` bound-variable wrappers, the `HasFrees`
-//! trait with `frees`/`occurs`/`bounds_var_idx`/`avoid`/`rename`, and
-//! `nat_to_fresh_vars`.
+//! the `BVar` bound-variable wrapper, and the `HasFrees` trait with
+//! `frees`/`bounds_var_idx`/`avoid`/`rename`.
 //!
 //! The `MonotoneFunction` split (AC-preserving vs. arbitrary updates) is
 //! ported as a `monotone: bool` flag rather than an enum: see
@@ -21,9 +19,10 @@
 use std::cmp::Ordering;
 
 use crate::function_symbols::{AcSym, FunSym, Privacy};
-use crate::term::{Term, TermView};
-use crate::vterm::{const_term, var_term, Lit, VTerm};
+use crate::term::Term;
+use crate::vterm::{const_term, Lit, VTerm};
 use tamarin_utils::cow::cow_map_vec;
+use tamarin_utils::fresh::MonadFresh;
 
 // =============================================================================
 // Sorts
@@ -82,6 +81,8 @@ pub fn sort_suffix(s: LSort) -> &'static str {
 // Names
 // =============================================================================
 
+/// HS `newtype NameId = NameId { getNameId :: String }` with a derived `Ord`
+/// (LTerm.hs).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NameId(pub &'static str);
 
@@ -96,9 +97,9 @@ impl NameId {
 
 /// Variant order mirrors the Haskell constructor order
 /// (`data NameTag = FreshName | PubName | NodeName | NatName | AbbrevName`,
-/// LTerm.hs:219), which the derived `Ord` on both sides reads off.
+/// LTerm.hs), which the derived `Ord` on both sides reads off.
 ///
-/// `Abbrev` is the tag `Web.Utils.shorten` (`src/Web/Utils.hs:71-88`) puts on
+/// `Abbrev` is the tag `Web.Utils.shorten` (`src/Web/Utils.hs`) puts on
 /// the short constant it substitutes for a long term; it never occurs in a
 /// parsed or solved term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -111,6 +112,9 @@ pub enum NameTag {
     Abbrev,
 }
 
+/// HS `data Name = Name {nTag :: NameTag, nId :: NameId}` with a derived `Ord`
+/// (LTerm.hs): the tag decides first, then the identifier.  This order
+/// reaches printed output through `Term`'s `Ord`, which sorts AC arguments.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Name {
@@ -143,7 +147,7 @@ pub fn sort_of_name(n: &Name) -> LSort {
         NameTag::Pub => LSort::Pub,
         NameTag::Node => LSort::Node,
         NameTag::Nat => LSort::Nat,
-        // LTerm.hs:266.
+        // LTerm.hs.
         NameTag::Abbrev => LSort::Msg,
     }
 }
@@ -156,7 +160,7 @@ pub fn sort_of_name(n: &Name) -> LSort {
 /// and index match.
 ///
 /// **Ord semantics**: idx FIRST, then sort, then name — mirrors Haskell's
-/// `instance Ord LVar` in `lib/term/src/Term/LTerm.hs:546-548`:
+/// `instance Ord LVar` in `lib/term/src/Term/LTerm.hs`:
 ///
 /// ```haskell
 /// instance Ord LVar where
@@ -166,7 +170,7 @@ pub fn sort_of_name(n: &Name) -> LSort {
 ///
 /// where `x1=name, x2=sort, x3=idx` (comment: *"An ord instance that prefers
 /// the 'lvarIdx' over the 'lvarName'."*).  This matters because Haskell's
-/// `unifyRaw` (Unification.hs:275-276) orients same-sort var-var bindings such
+/// `unifyRaw` (Unification.hs) orients same-sort var-var bindings such
 /// that the larger-Ord (=larger-idx) becomes the KEY:
 ///
 /// ```haskell
@@ -174,7 +178,7 @@ pub fn sort_of_name(n: &Name) -> LSort {
 /// ```
 ///
 /// Combined with `refineSource`'s post-saturate
-/// `restrict stableVars sSubst` (Sources.hs:119-126, see line 123), this ensures stable
+/// `restrict stableVars sSubst` (Sources.hs), this ensures stable
 /// pattern vars (small idx like t.1, t.2) are NEVER keys, so all
 /// stable-keyed bindings drop and pattern vars stay unbound for runtime
 /// `applySource` to bind cleanly.
@@ -263,15 +267,6 @@ pub fn fresh_lvar(
 // Predicates on LNTerm
 // =============================================================================
 
-// Intentionally retained: faithful HS port of `sortOfLit` (LTerm.hs); no caller yet.
-#[allow(dead_code)]
-pub(crate) fn sort_of_lit(l: &Lit<Name, LVar>) -> LSort {
-    match l {
-        Lit::Con(n) => sort_of_name(n),
-        Lit::Var(v) => v.sort,
-    }
-}
-
 /// Most precise sort of an `LNTerm`.
 pub fn sort_of_lnterm(t: &LNTerm) -> LSort {
     sort_of_lterm(t, sort_of_name)
@@ -294,7 +289,7 @@ pub fn sort_of_lterm<C, F: Fn(&C) -> LSort>(t: &LTerm<C>, sort_of_const: F) -> L
 
 /// `t` is a single variable with the given sort.
 fn is_var_of_sort(t: &LNTerm, want: LSort) -> bool {
-    matches!(t.view(), TermView::Lit(Lit::Var(v)) if v.sort == want)
+    matches!(t, Term::Lit(Lit::Var(v)) if v.sort == want)
 }
 
 pub fn is_msg_var(t: &LNTerm) -> bool {
@@ -303,20 +298,17 @@ pub fn is_msg_var(t: &LNTerm) -> bool {
 pub fn is_pub_var(t: &LNTerm) -> bool {
     is_var_of_sort(t, LSort::Pub)
 }
-pub fn is_nat_var(t: &LNTerm) -> bool {
-    is_var_of_sort(t, LSort::Nat)
-}
 pub fn is_fresh_var(t: &LNTerm) -> bool {
     is_var_of_sort(t, LSort::Fresh)
 }
 
 pub fn is_pub_const(t: &LNTerm) -> bool {
-    matches!(t.view(), TermView::Lit(Lit::Con(n)) if sort_of_name(n) == LSort::Pub)
+    matches!(t, Term::Lit(Lit::Con(n)) if sort_of_name(n) == LSort::Pub)
 }
 
 /// If `t` is a single variable, return it.
 pub fn get_var(t: &LNTerm) -> Option<&LVar> {
-    if let TermView::Lit(Lit::Var(v)) = t.view() {
+    if let Term::Lit(Lit::Var(v)) = t {
         Some(v)
     } else {
         None
@@ -325,23 +317,13 @@ pub fn get_var(t: &LNTerm) -> Option<&LVar> {
 
 /// `containsPrivate t`: any private NoEq symbol anywhere in `t`?
 pub fn contains_private<A>(t: &Term<A>) -> bool {
-    match t {
-        Term::Lit(_) => false,
-        Term::App(FunSym::NoEq(s), args) => {
-            s.privacy == Privacy::Private || args.iter().any(contains_private)
-        }
-        Term::App(_, args) => args.iter().any(contains_private),
-    }
+    t.any_fun_sym(|f| matches!(f, FunSym::NoEq(s) if s.privacy == Privacy::Private))
 }
 
 /// `containsOnlyNoEq t`: does `t` contain only NoEq function symbols (i.e.
 /// no AC and no C symbol)?  A literal trivially qualifies.
 pub fn contains_only_no_eq<A>(t: &Term<A>) -> bool {
-    match t {
-        Term::Lit(_) => true,
-        Term::App(FunSym::NoEq(_), args) => args.iter().all(contains_only_no_eq),
-        Term::App(_, _) => false,
-    }
+    t.all_fun_syms(|f| matches!(f, FunSym::NoEq(_)))
 }
 
 /// `containsNoPrivateExcept funs t`: does `t` contain no private function
@@ -349,13 +331,9 @@ pub fn contains_only_no_eq<A>(t: &Term<A>) -> bool {
 /// `FunSym`, so a symbol differing in arity/constructability/NDC state from
 /// its `funs` entry is not exempted.
 pub fn contains_no_private_except<A>(funs: &[FunSym], t: &Term<A>) -> bool {
-    match t {
-        Term::Lit(_) => true,
-        Term::App(f @ FunSym::NoEq(s), args) if s.privacy == Privacy::Private => {
-            funs.contains(f) && args.iter().all(|a| contains_no_private_except(funs, a))
-        }
-        Term::App(_, args) => args.iter().all(|a| contains_no_private_except(funs, a)),
-    }
+    t.all_fun_syms(|f| {
+        !matches!(f, FunSym::NoEq(s) if s.privacy == Privacy::Private) || funs.contains(f)
+    })
 }
 
 /// `isTrivialFunSymTerm t sym`: is `t` an application of `sym` whose
@@ -381,13 +359,13 @@ pub fn is_trivial_ac_fun_sym_term(t: &LNTerm) -> bool {
 pub fn flattened_ac_terms<A>(sym: AcSym, t: &Term<A>) -> Vec<&Term<A>> {
     let mut out = Vec::new();
     fn go<'b, A>(sym: AcSym, t: &'b Term<A>, out: &mut Vec<&'b Term<A>>) {
-        if let Term::App(FunSym::Ac(s), args) = t {
-            if *s == sym {
-                for a in args.iter() {
-                    go(sym, a, out);
-                }
-                return;
+        if let Term::App(FunSym::Ac(s), args) = t
+            && *s == sym
+        {
+            for a in args.iter() {
+                go(sym, a, out);
             }
+            return;
         }
         out.push(t);
     }
@@ -395,51 +373,43 @@ pub fn flattened_ac_terms<A>(sym: AcSym, t: &Term<A>) -> Vec<&Term<A>> {
     out
 }
 
-/// `freshToConst t`: replace every fresh-sort variable with a fresh-tagged
-/// constant carrying its name and index.
+/// HS `ltermNodeId` (LTerm.hs): the node-id variable of a term that is
+/// one — a variable leaf of sort `LSortNode` — and `None` otherwise.
 ///
-/// Intentionally retained: faithful HS port of `freshToConst` (LTerm.hs); no
-/// production caller yet (exercised only by the unit test below).
-#[allow(dead_code)]
-pub(crate) fn fresh_to_const(t: LNTerm) -> LNTerm {
+/// The sort guard is load-bearing for the solver: answering `Some` for another
+/// sort fires `insertFormula`'s `Eq`/`Less` → disjunction CR-rules on a
+/// `¬(a = b)` formula over message variables, which HS instead keeps in
+/// `sFormulas` (the `WrongEquality` lemma of
+/// examples/regression/trace/MinValueEq.spthy).
+pub fn lterm_node_id<C>(t: &crate::term::Term<crate::vterm::Lit<C, LVar>>) -> Option<LVar> {
     match t {
-        Term::Lit(Lit::Var(ref v)) if v.sort == LSort::Fresh => variable_to_const(v),
-        Term::Lit(_) => t,
-        Term::App(f, args) => {
-            let mapped: Vec<LNTerm> = args.iter().cloned().map(fresh_to_const).collect();
-            Term::App(f, mapped.into())
-        }
+        crate::term::Term::Lit(crate::vterm::Lit::Var(v)) if v.sort == LSort::Node => Some(*v),
+        _ => None,
     }
-}
-
-/// `variableToConst v`: build a constant whose name encodes `v`'s sort,
-/// index, and name. Panics if `v.sort` is `LSort::Msg`, mirroring the
-/// Haskell `error "Invalid sort Msg"`.
-pub fn variable_to_const(v: &LVar) -> LNTerm {
-    // `sort_show` mirrors Haskell `show vsort` (derived `Show LSort`), which
-    // yields "LSortPub"/"LSortFresh"/"LSortNode"/"LSortNat" — NOT the bare
-    // Rust Debug names ("Pub"/"Fresh"/...).  See LTerm.hs:436-438
-    // (`variableToConst`/`toConstName`) and the `data LSort` declaration at
-    // LTerm.hs:165-170.
-    let (tag, sort_show) = match v.sort {
-        LSort::Fresh => (NameTag::Fresh, "LSortFresh"),
-        LSort::Pub => (NameTag::Pub, "LSortPub"),
-        LSort::Node => (NameTag::Node, "LSortNode"),
-        LSort::Nat => (NameTag::Nat, "LSortNat"),
-        LSort::Msg => panic!("variable_to_const: invalid sort Msg"),
-    };
-    let id = format!("constVar_{}_{}_{}", sort_show, v.idx, v.name);
-    const_term(Name::new(tag, id))
 }
 
 // =============================================================================
 // BVar — bound or free variable (for binders / formulas)
 // =============================================================================
 
+/// HS `data BVar v = Bound Integer | Free v` derives `Ord` in that variant
+/// order (LTerm.hs), which orders the terms inside a formula.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BVar<V> {
     Bound(u64),
     Free(V),
+}
+
+/// HS `bltermNodeId` (LTerm.hs): the node-id variable of a term that
+/// is one — a `Free` leaf of sort `LSortNode` — and `None` otherwise.
+pub fn blterm_node_id<C>(t: &crate::term::Term<crate::vterm::Lit<C, BVar<LVar>>>) -> Option<LVar> {
+    match t {
+        crate::term::Term::Lit(crate::vterm::Lit::Var(BVar::Free(v))) if v.sort == LSort::Node => {
+            Some(*v)
+        }
+        _ => None,
+    }
 }
 
 impl<V> BVar<V> {
@@ -458,49 +428,19 @@ impl<V> BVar<V> {
     }
 }
 
-pub(crate) type BLVar = BVar<LVar>;
-/// `BLTerm` — `NTerm<BLVar>`.
-pub(crate) type BLTerm = NTerm<BLVar>;
-
-// Intentionally retained: faithful HS ports of `freeLNTerm`/`freeTerm`
-// (LTerm.hs). Currently unwired — the macro path that consumes them lives in
-// `macro_expand.rs` (reimplemented on the parser AST).
-#[allow(dead_code)]
-pub(crate) fn free_lnterm(v: LVar) -> BLVar {
-    BVar::Free(v)
-}
-
-/// Convert an `LNTerm` to a term over `BVar<LVar>` — every variable becomes
-/// `Free`.
-#[allow(dead_code)]
-pub(crate) fn free_term(t: LNTerm) -> BLTerm {
-    match t {
-        Term::Lit(Lit::Var(v)) => crate::term::lit(Lit::Var(BVar::Free(v))),
-        Term::Lit(Lit::Con(c)) => crate::term::lit(Lit::Con(c)),
-        Term::App(f, args) => Term::App(
-            f,
-            args.iter()
-                .cloned()
-                .map(free_term)
-                .collect::<Vec<_>>()
-                .into(),
-        ),
-    }
-}
-
 // =============================================================================
 // HasFrees — collect / map over free LVars
 // =============================================================================
 
 /// A type that contains free `LVar`s. The Haskell typeclass takes a
-/// `MonotoneFunction` (LTerm.hs:574-575) distinguishing AC-position-preserving
+/// `MonotoneFunction` (LTerm.hs) distinguishing AC-position-preserving
 /// updates (`Monotone`, used by `rename`/`renameIgnoring`/`renameAvoiding*`
 /// index shifts) from arbitrary ones (`Arbitrary`, used by `someInst`,
 /// `applyVTerm` substitution, `fmap`). The two differ only at AC sub-terms:
 /// `Arbitrary` re-sorts the AC argument list (`fApp` -> `fAppAC`), while
 /// `Monotone` preserves the relative argument order (`unsafefApp`) because a
 /// monotone shift cannot change the AC-normal form ordering
-/// (`instance HasFrees (Term l)`'s `mapFrees`, LTerm.hs:788-791).
+/// (`instance HasFrees (Term l)`'s `mapFrees`, LTerm.hs).
 pub trait HasFrees {
     /// Visit every free `LVar` exactly once in deterministic order.
     fn for_each_free(&self, f: &mut dyn FnMut(&LVar));
@@ -526,7 +466,7 @@ pub trait HasFrees {
     /// `Monotone` map: preserves AC argument order.  Use ONLY where HS uses
     /// `rename`/`renameIgnoring`/`renameAvoiding*`/`someRuleACInst*` — i.e.
     /// pure index shifts whose monotonicity guarantees the AC-normal form
-    /// does not change (LTerm.hs:569-575).
+    /// does not change (LTerm.hs).
     fn map_free_monotone(self, f: &mut dyn FnMut(LVar) -> LVar) -> Self
     where
         Self: Sized,
@@ -542,23 +482,20 @@ pub fn frees_list<T: HasFrees>(t: &T) -> Vec<LVar> {
     out
 }
 
+/// `getAny . foldFrees (Any . (v ==))` (Simplification.hs): whether `v` is
+/// one of the free `LVar`s of `t`, compared on name, sort and index.
+pub fn occurs_free<T: HasFrees + ?Sized>(v: &LVar, t: &T) -> bool {
+    let mut found = false;
+    t.for_each_free(&mut |w| found |= w == v);
+    found
+}
+
 /// `frees`: deduplicated, sorted free `LVar`s.
 pub fn frees<T: HasFrees>(t: &T) -> Vec<LVar> {
     let mut out = frees_list(t);
     out.sort();
     out.dedup();
     out
-}
-
-/// `occurs v t`: whether `v` is among `t`'s free variables.
-pub fn occurs<T: HasFrees>(v: &LVar, t: &T) -> bool {
-    let mut found = false;
-    t.for_each_free(&mut |w| {
-        if w == v {
-            found = true;
-        }
-    });
-    found
 }
 
 /// `boundsVarIdx t`: smallest and largest free variable indices in `t`.
@@ -634,9 +571,10 @@ impl HasFreesV for LVar {
     }
 }
 
-// Intentionally retained: faithful HS port of the `HasFrees (BVar v)` instance,
-// so `Lit<C, BVar<LVar>>` is a `HasFrees` leaf. Not yet reached through the
-// trait (formula terms over `BVar<LVar>` are traversed by pattern matching).
+// HS `instance HasFrees v => HasFrees (BVar v)` (LTerm.hs): a `Bound`
+// index carries no variable, so both directions pass it through.  This makes
+// `Lit<C, BVar<LVar>>` a `HasFrees` leaf, which is how the guarded formula's
+// terms over `BVar<LVar>` reach the trait.
 impl HasFreesV for BVar<LVar> {
     fn for_each_free_v(&self, f: &mut dyn FnMut(&LVar)) {
         if let BVar::Free(v) = self {
@@ -668,12 +606,12 @@ where
     fn map_free_with(self, f: &mut dyn FnMut(LVar) -> LVar, monotone: bool) -> Self {
         // Copy-on-write: when `f` is identity on every free leaf of a subtree,
         // that subtree is unchanged, so reuse it (the owned `self`) instead of
-        // cloning all args and re-running `f_app`/`unsafe_f_app`.  Mirrors
-        // `subst::apply_vterm_map_changed`.  Byte-identical: a subtree with no
+        // cloning all args and re-running `f_app`/`unsafe_f_app`.  Mirrors the
+        // `Apply` instance for `VTerm`.  Byte-identical: a subtree with no
         // remapped leaf is already in `f_app`-normal form (the monotone path
         // never re-sorts; the non-monotone path's `f_app` re-sort of unchanged,
-        // already-normal args yields the same term — the same invariant
-        // `apply_vterm_map_changed` relies on).
+        // already-normal args yields the same term — the same invariant that
+        // instance relies on).
         match map_free_term_cow(&self, f, monotone) {
             Some(t) => t,
             None => self,
@@ -759,6 +697,20 @@ impl<T: HasFrees> HasFrees for Option<T> {
     }
 }
 
+/// Free-variable traversal through a shared pointer, for the `HasFrees`
+/// containers whose elements the port stores behind an `Arc`.  The map takes
+/// the payload out when this handle is its sole owner and clones it when it
+/// is not.
+impl<T: HasFrees + Clone> HasFrees for std::sync::Arc<T> {
+    fn for_each_free(&self, f: &mut dyn FnMut(&LVar)) {
+        (**self).for_each_free(f);
+    }
+    fn map_free_with(self, f: &mut dyn FnMut(LVar) -> LVar, monotone: bool) -> Self {
+        let inner = std::sync::Arc::try_unwrap(self).unwrap_or_else(|shared| (*shared).clone());
+        std::sync::Arc::new(inner.map_free_with(f, monotone))
+    }
+}
+
 // =============================================================================
 // Renaming helpers
 // =============================================================================
@@ -767,10 +719,10 @@ impl<T: HasFrees> HasFrees for Option<T> {
 /// sort and name hint).
 ///
 /// The empty-exemption case of [`rename_ignoring`]: HS states the two
-/// separately (`rename`, LTerm.hs:638-645) with bodies that differ only in the
+/// separately (`rename`, LTerm.hs) with bodies that differ only in the
 /// `elem … vars` test, which an empty list always answers `False`.
 #[inline]
-pub fn rename<T: HasFrees>(t: T, fresh: &mut tamarin_utils::fresh::FastFreshState) -> T {
+pub fn rename<T: HasFrees, M: MonadFresh>(t: T, fresh: &mut M) -> T {
     rename_ignoring(&[], t, fresh)
 }
 
@@ -779,18 +731,14 @@ pub fn rename<T: HasFrees>(t: T, fresh: &mut tamarin_utils::fresh::FastFreshStat
 /// for `rename` — the result is not guaranteed to be equal for terms that are
 /// equal modulo variable indices.
 #[inline]
-pub fn rename_ignoring<T: HasFrees>(
-    vars: &[LVar],
-    t: T,
-    fresh: &mut tamarin_utils::fresh::FastFreshState,
-) -> T {
+pub fn rename_ignoring<T: HasFrees, M: MonadFresh>(vars: &[LVar], t: T, fresh: &mut M) -> T {
     match bounds_var_idx(&t) {
         None => t,
         Some((min, max)) => {
             let span = max - min + 1;
             let fresh_start = fresh.fresh_idents(span);
             let shift = fresh_start as i128 - min as i128;
-            // HS `renameIgnoring` (LTerm.hs:650-657) uses `mapFrees (Monotone
+            // HS `renameIgnoring` (LTerm.hs) uses `mapFrees (Monotone
             // ...)` here even though the `vars` exemption makes the map
             // non-monotone in general; transcribing HS verbatim (rather than
             // "fixing" it to an `Arbitrary` map) is what preserves AC arg
@@ -818,34 +766,11 @@ pub fn rename_avoiding_ignoring<S: HasFrees, T: HasFrees>(s: S, avoid_in: &T, va
     rename_ignoring(vars, s, &mut fresh)
 }
 
-/// `renameAvoiding s avoid_in` (LTerm.hs:696): replace all free variables in
+/// `renameAvoiding s avoid_in` (LTerm.hs): replace all free variables in
 /// `s` by fresh variables avoiding the variables in `avoid_in`.
 pub fn rename_avoiding<S: HasFrees, T: HasFrees>(s: S, avoid_in: &T) -> S {
     let mut fresh = avoid(avoid_in);
     rename(s, &mut fresh)
-}
-
-// Intentionally retained: faithful HS port of `natToFreshVars` (LTerm.hs).
-// Currently unwired — the nat→fresh logic on the parser AST in `deriv_check.rs`
-// supersedes this term-level version (exercised only by the unit test below).
-#[allow(dead_code)]
-pub(crate) fn nat_to_fresh_vars(t: LNTerm) -> LNTerm {
-    match t {
-        Term::Lit(Lit::Var(LVar {
-            name,
-            sort: LSort::Nat,
-            idx,
-        })) => var_term(LVar {
-            name,
-            sort: LSort::Fresh,
-            idx,
-        }),
-        Term::Lit(_) => t,
-        Term::App(f, args) => {
-            let mapped: Vec<LNTerm> = args.iter().cloned().map(nat_to_fresh_vars).collect();
-            Term::App(f, mapped.into())
-        }
-    }
 }
 
 /// Hand-written serde for `NameId` and `LVar`, which hold an interned name.
@@ -905,6 +830,27 @@ mod tests {
     use super::*;
     use crate::function_symbols::pair_sym;
     use crate::term::f_app_no_eq;
+    use crate::vterm::var_term;
+
+    /// `Name`'s derived `Ord` compares the tag before the identifier, and
+    /// `NameId`'s compares its one string, as HS's declarations do.
+    #[test]
+    fn name_ord_compares_the_tag_before_the_id() {
+        let fresh_z = Name::new(NameTag::Fresh, "z");
+        let pub_a = Name::new(NameTag::Pub, "a");
+        assert!(fresh_z < pub_a, "the tag decides before the identifier");
+        assert!(Name::new(NameTag::Pub, "a") < Name::new(NameTag::Pub, "b"));
+        assert!(NameId::new("a") < NameId::new("b"));
+    }
+
+    /// `Bound` before `Free`, the variant order of HS's `BVar v`.
+    #[test]
+    fn bvar_ord_puts_bound_before_free() {
+        let bound: BVar<LVar> = BVar::Bound(9);
+        let free = BVar::Free(LVar::new("x", LSort::Msg, 0));
+        assert!(bound < free);
+        assert!(BVar::<LVar>::Bound(0) < BVar::Bound(1));
+    }
 
     #[test]
     fn name_sort_mapping() {
@@ -913,9 +859,23 @@ mod tests {
         assert_eq!(sort_of_name(&Name::new(NameTag::Node, "n")), LSort::Node);
         assert_eq!(sort_of_name(&Name::new(NameTag::Nat, "n")), LSort::Nat);
         // The web abbreviation tag has no sort of its own.  It falls back to
-        // Msg (LTerm.hs:266).  It is the one tag whose sort does not carry
+        // Msg (LTerm.hs).  It is the one tag whose sort does not carry
         // the name of the tag.
         assert_eq!(sort_of_name(&Name::new(NameTag::Abbrev, "a")), LSort::Msg);
+    }
+
+    #[test]
+    fn arc_walks_and_maps_the_payload() {
+        use std::sync::Arc;
+        let v = LVar::new("x", LSort::Msg, 3);
+        let shared: Arc<LNTerm> = Arc::new(var_term(v));
+        assert_eq!(frees_list(&shared), vec![v]);
+        // A second handle forces the payload to be cloned before it is
+        // mapped, and leaves the original handle's term alone.
+        let other = Arc::clone(&shared);
+        let mapped = other.map_free(&mut |w| LVar::new(w.name, w.sort, w.idx + 1));
+        assert_eq!(*mapped, var_term(LVar::new("x", LSort::Msg, 4)));
+        assert_eq!(*shared, var_term(v));
     }
 
     #[test]
@@ -925,6 +885,26 @@ mod tests {
         assert!(is_msg_var(&t));
         assert!(!is_pub_var(&t));
         assert_eq!(get_var(&t), Some(&v));
+    }
+
+    /// The `LSortNode` guard is the MinValueEq `WrongEquality` invariant: a
+    /// message variable is not a node id, so a negated equality over two of
+    /// them stays a formula instead of splitting into an ordering
+    /// disjunction.
+    #[test]
+    fn lterm_node_id_rejects_a_message_sorted_variable() {
+        let i = LVar::new("i", LSort::Node, 0);
+        let n: LNTerm = var_term(i);
+        assert_eq!(lterm_node_id(&n), Some(i));
+        let m: LNTerm = var_term(LVar::new("a", LSort::Msg, 0));
+        assert_eq!(lterm_node_id(&m), None);
+    }
+
+    #[test]
+    fn lterm_node_id_rejects_an_application() {
+        let n: LNTerm = var_term(LVar::new("i", LSort::Node, 0));
+        let t: LNTerm = f_app_no_eq(pair_sym(), vec![n.clone(), n]);
+        assert_eq!(lterm_node_id(&t), None);
     }
 
     #[test]
@@ -953,43 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_to_const_replaces_only_fresh_vars() {
-        let v_fresh: LNTerm = var_term(LVar::new("k", LSort::Fresh, 0));
-        let v_pub: LNTerm = var_term(LVar::new("p", LSort::Pub, 0));
-        let t: LNTerm = f_app_no_eq(pair_sym(), vec![v_fresh, v_pub.clone()]);
-        let r = fresh_to_const(t);
-        if let Term::App(_, ts) = &r {
-            // The fresh variable becomes the constant that `variableToConst`
-            // builds.  The id of that constant spells the sort as Haskell's
-            // `show LSort` does (LTerm.hs:436-438).  It is `LSortFresh`, not
-            // the bare `Fresh`.
-            assert_eq!(
-                ts[0],
-                const_term(Name::new(NameTag::Fresh, "constVar_LSortFresh_0_k"))
-            );
-            // The function does not change the pub variable.
-            assert_eq!(ts[1], v_pub);
-        } else {
-            panic!();
-        }
-        // The other sorts follow the same spelling rule.  The index sits
-        // between the sort and the name.
-        assert_eq!(
-            variable_to_const(&LVar::new("A", LSort::Pub, 7)),
-            const_term(Name::new(NameTag::Pub, "constVar_LSortPub_7_A"))
-        );
-    }
-
-    #[test]
-    fn nat_to_fresh_vars_swaps_sort() {
-        let t: LNTerm = var_term(LVar::new("n", LSort::Nat, 3));
-        let r = nat_to_fresh_vars(t);
-        // Only the sort changes.  The function carries over the name hint and
-        // the index.
-        assert_eq!(get_var(&r), Some(&LVar::new("n", LSort::Fresh, 3)));
-    }
-
-    #[test]
     fn contains_private_detects_private_symbol() {
         // diff is private.
         let t: LNTerm = f_app_no_eq(
@@ -1014,7 +957,7 @@ mod tests {
     // counterpart by checked file:line below.**
     // =========================================================================
 
-    /// LTerm.hs:165-170:
+    /// LTerm.hs:
     ///     data LSort = LSortPub | LSortFresh | LSortMsg | LSortNode | LSortNat
     ///                deriving( Eq, Ord, ... )
     #[test]
@@ -1028,7 +971,7 @@ mod tests {
         assert!(LSort::Pub < LSort::Nat);
     }
 
-    /// LTerm.hs:219:
+    /// LTerm.hs:
     ///     data NameTag = FreshName | PubName | NodeName | NatName | AbbrevName
     #[test]
     fn name_tag_ord_matches_haskell_declaration() {
@@ -1038,7 +981,7 @@ mod tests {
         assert!(NameTag::Nat < NameTag::Abbrev);
     }
 
-    /// Haskell `sortCompare` (LTerm.hs:181-191) is a PARTIAL ORDER, NOT
+    /// Haskell `sortCompare` (LTerm.hs) is a PARTIAL ORDER, NOT
     /// the same as `Ord LSort`.  Specifically:
     ///   - Msg is greater than every other comparable sort
     ///   - Node is incomparable to ALL other sorts (returns Nothing)

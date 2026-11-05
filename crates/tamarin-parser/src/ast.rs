@@ -1,15 +1,16 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Surface-syntax AST for `.spthy` files: the loose tree [`crate::parser`]
-//! produces and [`crate::wf`] (plus, downstream, `tamarin-theory`'s
-//! elaboration) consumes.
+//! produces and `tamarin-theory` (wellformedness, elaboration) consumes.
 //!
 //! Nodes mirror Tamarin's concrete syntax rather than any single Haskell type —
 //! the HS parser builds straight into the semantic `Theory`, so this is a
 //! syntax-level staging form that a later elaboration pass lowers. [`Theory`] is
 //! the root; every other type hangs off its [`TheoryItem`] stream.
+
+use tamarin_term::lterm::LSort;
+pub use tamarin_term::tags::{FactAnnotation, LemmaAttr, TraceQuantifier};
 
 // =============================================================================
 // Top-level theory
@@ -23,6 +24,44 @@ pub struct Theory {
     pub items: Vec<TheoryItem>,
 }
 
+/// Theory options accepted by the surface grammar, in canonical print order.
+///
+/// Keeping their spelling and ordering here gives the parser and the semantic
+/// theory representation one source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum DeclarableOption {
+    TranslationProgress,
+    TranslationAllowPatternLookups,
+    TranslationStateOptimisation,
+    TranslationAsynchronousChannels,
+    TranslationCompressEvents,
+}
+
+impl DeclarableOption {
+    pub const ALL: [Self; 5] = [
+        Self::TranslationProgress,
+        Self::TranslationAllowPatternLookups,
+        Self::TranslationStateOptimisation,
+        Self::TranslationAsynchronousChannels,
+        Self::TranslationCompressEvents,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TranslationProgress => "translation-progress",
+            Self::TranslationAllowPatternLookups => "translation-allow-pattern-lookups",
+            Self::TranslationStateOptimisation => "translation-state-optimisation",
+            Self::TranslationAsynchronousChannels => "translation-asynchronous-channels",
+            Self::TranslationCompressEvents => "translation-compress-events",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|option| option.as_str() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TheoryItem {
     Builtins(Vec<String>),
@@ -34,7 +73,10 @@ pub enum TheoryItem {
     Macros(Vec<Macro>),
     Predicates(Vec<Predicate>),
     Options(Vec<String>),
-    Heuristic(String),
+    Heuristic {
+        raw: String,
+        source_file: Option<String>,
+    },
     Tactic(Tactic),
     Restriction(Restriction),
     LegacyAxiom(Restriction),
@@ -56,12 +98,6 @@ pub enum TheoryItem {
         header: String,
         body: String,
     },
-    // `#ifdef` never yields an item: the parser evaluates the flag formula
-    // and splices the live branch's items into the surrounding stream
-    // (parser.rs `expand_ifdef`), matching HS's parse-time preprocessing —
-    // so `items` is always the flat post-preprocessor stream.
-    Define(String),
-    Include(String),
 }
 
 // =============================================================================
@@ -87,7 +123,7 @@ pub struct FunctionDecl {
     /// diff-mode intruder rules (HS `NDCstate IsNDCDiff`).
     ///
     /// The symbol's NDC state is the join of the two flags (HS `function`,
-    /// Theory/Text/Parser/Signature.hs:183-225): neither = `NotNDC`, `ndc`
+    /// Theory/Text/Parser/Signature.hs): neither = `NotNDC`, `ndc`
     /// alone = `IsNDC`, `ndc_diff` alone = `IsNDCDiff`, both = `IsNDCBoth`.
     pub ndc_diff: bool,
 }
@@ -133,7 +169,6 @@ pub struct Rule {
     pub name: String,
     pub modulo: Option<String>, // E or AC
     pub attributes: Vec<RuleAttr>,
-    pub let_block: Vec<LetBinding>,
     pub premises: Vec<Fact>,
     pub actions: Vec<Fact>,
     pub conclusions: Vec<Fact>,
@@ -150,18 +185,12 @@ pub enum RuleAttr {
     IsSapicRule,
     /// `process="..."` — the rendered `prettySapicTopLevel'` of a
     /// SAPIC-generated rule's subprocess.  HS's rule-attribute PARSER ignores
-    /// a user-written `process=` (`parseAndIgnore`, Parser/Rule.hs:68-93, see line 72), so this
+    /// a user-written `process=` (`parseAndIgnore`, Parser/Rule.hs), so this
     /// variant is never produced by the parser; it is synthesised only by the
     /// SAPIC translation when it injects generated rules into the parsed theory
     /// (so the pretty-printer renders the `process="..."` attribute).
     Process(String),
     External(String, Option<String>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LetBinding {
-    pub var: Term, // pattern
-    pub value: Term,
 }
 
 // =============================================================================
@@ -171,7 +200,9 @@ pub struct LetBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lemma {
     pub name: String,
-    pub modulo: Option<String>,
+    /// Included fragment that declared this lemma. `None` denotes the root
+    /// theory, whose filename is supplied by the loading surface.
+    pub source_file: Option<String>,
     pub attributes: Vec<LemmaAttr>,
     pub trace_quantifier: TraceQuantifier,
     pub formula: Formula,
@@ -179,9 +210,9 @@ pub struct Lemma {
     /// The verbatim source text of the lemma (from the `lemma` keyword up to
     /// and including the trailing whitespace/comments after its proof
     /// skeleton), with comments stripped.  Mirrors HS `_lPlaintext`
-    /// (`ProtoLemma`, `Items/LemmaItem.hs:48-58, see line 50`), which the parser fills from
+    /// (`ProtoLemma`, `Items/LemmaItem.hs`), which the parser fills from
     /// `removeComments $ take (length start - length end) start`
-    /// (`Theory/Text/Parser/Lemma.hs:78-88, see line 87`).  Used only by the interactive web
+    /// (`Theory/Text/Parser/Lemma.hs`).  Used only by the interactive web
     /// server's Edit-lemma form (never rendered by `--prove`).
     pub plaintext: String,
 }
@@ -189,6 +220,8 @@ pub struct Lemma {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffLemma {
     pub name: String,
+    /// Included fragment that declared this diff lemma.
+    pub source_file: Option<String>,
     pub attributes: Vec<LemmaAttr>,
     pub proof: Option<ProofSkeleton>,
 }
@@ -196,6 +229,8 @@ pub struct DiffLemma {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccLemma {
     pub name: String,
+    /// Included fragment that declared this accountability lemma.
+    pub source_file: Option<String>,
     pub attributes: Vec<LemmaAttr>,
     pub formula: Formula,
     pub case_test_idents: Vec<String>,
@@ -207,50 +242,29 @@ pub struct CaseTest {
     pub formula: Formula,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum TraceQuantifier {
-    AllTraces,
-    ExistsTrace,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LemmaAttr {
-    Sources,
-    Reuse,
-    DiffReuse,
-    UseInduction,
-    HideLemma(String),
-    Heuristic(String),
-    Output(Vec<String>),
-    Left,
-    Right,
-    Hint(String),
-}
-
 /// Structured skeleton parse — mirrors HS's
 /// `LTree (ProofStep ProofMethod (Maybe System))` produced by
 /// `Theory.Text.Parser.Proof.startProofSkeleton`
-/// (lib/theory/src/Theory/Text/Parser/Proof.hs:90-115).
+/// (lib/theory/src/Theory/Text/Parser/Proof.hs).
 ///
 /// The skeleton is the *static* tree as written in the `.spthy` source,
 /// before any prover is run; `by sorry` leaves are the placeholders
-/// `replaceSorryProver` (HS: Theory/Proof.hs:642-651) replaces with
+/// `replaceSorryProver` (HS: Theory/Proof.hs) replaces with
 /// auto-prover output at proof-replay time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProofSkeleton {
-    /// Raw source text of the proof skeleton (used for diagnostics/logging and
-    /// propagated into theory.rs's `ProofSkeleton` during elaboration).
+    /// Raw source text of the proof skeleton.
     pub raw: String,
-    /// Structured parse of `raw`.  `None` only if `try_proof_skeleton`
-    /// failed to interpret the token stream (we always set this for
-    /// well-formed proofs).
+    /// Structured regular-proof parse of `raw`. Always `Some` for a regular
+    /// lemma parsed from source; diff lemmas keep this as `None` because their
+    /// separately validated methods are not executable by regular replay.
     pub tree: Option<ParsedProofTree>,
 }
 
 /// One node of the parsed proof skeleton.
 ///
 /// Mirrors HS's `LNode (ProofStep ProofMethod ()) (Map CaseName ProofSkeleton)`
-/// from lib/theory/src/Theory/Text/Parser/Proof.hs:98-115:
+/// from lib/theory/src/Theory/Text/Parser/Proof.hs:
 ///
 /// ```haskell
 /// proofSkeleton =
@@ -277,175 +291,92 @@ pub struct ParsedProofTree {
     pub cases: Vec<(String, ParsedProofTree)>,
 }
 
-/// Parsed proof method.  Mirrors HS's `ProofMethod` enum (matched by
-/// `Theory.Text.Parser.Proof.proofMethod`, Text/Parser/Proof.hs:76-85).  Plus
-/// `Solved` for the `SOLVED` keyword leaf and `Other` for any token
-/// pattern intentionally left to the auto-prover fallback.
+/// Parsed proof method.  Mirrors the `ProofMethod` values HS's
+/// `proofMethod` (Theory/Text/Parser/Proof.hs) produces, plus
+/// `SolvedLeaf` for the `SOLVED` keyword, which HS reads at the skeleton
+/// level (`solvedProof`, Theory/Text/Parser/Proof.hs).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedMethod {
-    /// `by sorry` or `sorry` (HS: `Sorry Nothing`).  This is the
-    /// placeholder `replaceSorryProver` replaces.
+    /// `sorry` (HS `Sorry Nothing`).  This is the placeholder
+    /// `replaceSorryProver` replaces.
     Sorry,
-    /// `by contradiction` (HS: `Finished (Contradictory Nothing)`).
+    /// `contradiction` (HS `Finished (Contradictory Nothing)`).
     Contradiction,
-    /// `simplify` (HS: `Simplify`).
+    /// `simplify` (HS `Simplify`).
     Simplify,
-    /// `induction` (HS: `Induction`).
+    /// `induction` (HS `Induction`).
     Induction,
-    /// `solve( <goal-text> )` (HS: `SolveGoal <parsed-goal>`).  We
-    /// capture the raw inner text plus a best-effort parsed `GoalSpec`.
-    /// The String is the raw text inside `solve( ... )`, preserved for
-    /// HS-faithful unannotated subtree display (see `replay.rs`).
-    SolveGoal(GoalSpec, String),
-    /// `SOLVED` (HS: `Finished Solved`).
+    /// `solve( <goal> )` (HS `SolveGoal <goal>`).
+    SolveGoal(GoalSpec),
+    /// `SOLVED` (HS `Finished Solved`).
     SolvedLeaf,
-    /// `UNFINISHABLE` (HS: `Finished Unfinishable`).
+    /// `UNFINISHABLE` (HS `Finished Unfinishable`).
     Unfinishable,
-    /// `INVALIDATED` (HS: `Invalidated`).
+    /// `INVALIDATED` (HS `Invalidated`).
     Invalidated,
-    /// Any proof-method token not matched by a structural variant;
-    /// intentionally replayed via the auto-prover.
-    Other(String),
 }
 
-/// Best-effort parse of the formula inside `solve( ... )`.
+/// The goal of a stored `solve( ... )` step.
 ///
-/// The text inside `solve(...)` is one of HS's `goal` parses
-/// (Theory/Text/Parser/Proof.hs:38-72):
-///
-///   - `Fact( ... ) @ #var`        →  ActionG
-///   - `Fact( ... ) ▶<n> #var`     →  PremiseG (subscript-digit shows
-///     the premise index)
-///   - `gf1 ∥ gf2 ∥ ...`           →  DisjG (Disj [guardedFormula])
-///   - chain / subterm / splitEqs  →  Chain/Subterm/Split
-///
-/// We build the cheap-to-recognise variants (Action, Premise, Disj);
-/// everything else lands in `Raw` and the replay walker falls back to
-/// the auto-prover.
+/// [`crate::parser::parse_parens_goal`] builds these from HS's `goal` grammar
+/// (Theory/Text/Parser/Proof.hs); they mirror the HS `Goal`
+/// constructors (Constraints.hs) over surface terms and formulas
+/// instead of `LNTerm`s and `LNGuarded`s.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GoalSpec {
-    /// `Fact( args... ) @ #ivar` — action goal.
-    Action {
-        fact: Fact,
-        /// Timepoint variable ROOT name (sigil/idx stripped), e.g. `vk`
-        /// from `#vk.6`.
-        time_var: String,
-        /// Timepoint variable index (the `N` in `#vk.N`; `0` when absent).
-        /// HS's `ActionG i fa` carries the full LVar incl. idx, so this is
-        /// needed to re-render the goal head faithfully (`#vk.6`, not `#vk`)
-        /// and for exact goal-key matching at replay time.
-        time_idx: u32,
-    },
-    /// `Fact( args... ) ▶<idx> #ivar` — premise goal.  The premise
-    /// index is the digit after `▶` (UTF-8 ▶₀..▶₉).
-    Premise {
-        fact: Fact,
-        prem_idx: usize,
-        /// Node variable ROOT name (sigil/idx stripped).
-        time_var: String,
-        /// Node variable index (the `N` in `#i.N`; `0` when absent).
-        time_idx: u32,
-    },
-    /// `gf1 ∥ gf2 ∥ ...` — disjunction-split goal.  Mirrors HS
-    /// `disjSplitGoal = (DisjG . Disj) <$> sepBy1 guardedFormula
-    /// (symbol "∥")` (Theory/Text/Parser/Proof.hs:39-72, see line 61).
-    ///
-    /// HS parses each disjunct as a full `Guarded` value bearing
-    /// concrete LVar identities, then matches by structural equality
-    /// against the open `Goal::Disj(...)` in `sys.goals` (HS
-    /// ProofMethod.hs:254-274, see line 258 `SolveGoal goal -> guard (goal `M.member`
-    /// L.get sGoals sys)`).
-    ///
-    /// We can't reconstruct skeleton-text LVar indices reliably (they
-    /// differ from runtime indices), so we capture each disjunct's
-    /// STRUCTURAL signature (its top-level shape: quantified or not,
-    /// and the number of bound vars).  The replay matcher then looks
-    /// for an open `Goal::Disj` whose `d.0` list has the same length
-    /// and whose entries share the same per-alt shape.  At the points
-    /// where the HS-parsed disjunction would be matched, only ONE open
-    /// `Goal::Disj` typically lives in `sys.goals`, so the shape
-    /// signature is a sufficient discriminator.
-    Disj {
-        alts: Vec<DisjAlt>,
-        alt_texts: Vec<String>,
-    },
-    /// `(#i, n) ~~> (#j, m)` — chain-split goal.  Mirrors HS
-    /// `chainGoal = ChainG <$> (try (nodeConc <* opChain)) <*> nodePrem`
-    /// (Theory/Text/Parser/Proof.hs:39-72, see line 59).  `nodeConc`/`nodePrem` parse
-    /// `(<nodevar>, <natural>)` and the operator is `~~>` (HS
-    /// `prettyGoal (ChainG c p)` Constraints.hs:275-276).
-    ///
-    /// We capture the time-var names (e.g. `i`, `j` from `#i`/`#j`)
-    /// and the conclusion / premise indices.  The replay matcher
-    /// disambiguates by these idxs and the time-var ROOT name; LVar
-    /// suffix-idxs are intentionally ignored (skeleton-text indices
-    /// differ from runtime LVar indices — same pattern as Action /
-    /// Premise).
-    Chain {
-        src_var: String,
-        conc_idx: u32,
-        tgt_var: String,
-        prem_idx: u32,
-    },
-    /// `<small> ⊏ <big>` — subterm-split goal.  Mirrors HS
-    /// `stSplitGoal` (Theory/Text/Parser/Proof.hs:63-66):
-    /// ```haskell
-    /// stSplitGoal = do
-    ///   a <- try (termp <* opSubterm)
-    ///   b <- termp
-    ///   return $ SubtermG (a, b)
-    /// ```
-    /// and the pretty-printer at Constraints.hs:287-288 emits
-    /// `<term> ⊏ <term>` (U+228F).
-    ///
-    /// We keep both sides as raw text trimmed of outer whitespace; the
-    /// matcher compares against open `Goal::Subterm((l, r))` by canonical
-    /// pretty-printed text equality.
-    Subterm { small_raw: String, big_raw: String },
-    /// `splitEqs(N)` — equation-split goal.  Mirrors HS `eqSplitGoal`
-    /// (Theory/Text/Parser/Proof.hs:70-72):
-    /// ```haskell
-    /// eqSplitGoal = try $ do
-    ///   symbol_ "splitEqs"
-    ///   parens $ (SplitG . SplitId . fromIntegral) <$> natural
-    /// ```
-    /// and the pretty-printer at Constraints.hs:285-286 emits
-    /// `splitEqs(<i64>)`.  The matcher looks up `Goal::Split(SplitId(N))`
-    /// by exact id — split ids are stable identifiers minted by the
-    /// equation store, not subject to LVar-style renaming.
-    Split { split_id: i64 },
-    /// Anything we didn't structurally recognise.  Kept as raw text so
-    /// the walker can choose to either (a) fall back to auto-prover or
-    /// (b) be extended later to handle it.
-    Raw(String),
-}
-
-/// Structural signature of one alt inside a `solve( a ∥ b ∥ … )` text.
-/// See [`GoalSpec::Disj`] for context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DisjAlt {
-    /// `∀ x1 .. xN. …`  — universally quantified alt with `n_vars`
-    /// bound names.
-    All { n_vars: usize },
-    /// `∃ x1 .. xN. …`  — existentially quantified alt with `n_vars`
-    /// bound names.
-    Ex { n_vars: usize },
-    /// Atom, conjunction of atoms, or negated atom — anything that
-    /// does NOT begin with a top-level quantifier.  We don't try to
-    /// match deeper here; the count + shape mix is enough to
-    /// distinguish disjs that co-exist in `sys.goals` at any replay
-    /// point.
-    NonQuant,
+    /// `Fact( args... ) @ #i` — HS `ActionG LVar LNFact`.
+    Action(VarSpec, Fact),
+    /// `(#i, n) ~~> (#j, m)` — HS `ChainG NodeConc NodePrem`.  Both node
+    /// variables carry their index, and both natural indices are kept.
+    Chain((VarSpec, u64), (VarSpec, u64)),
+    /// `Fact( args... ) ▶<n> #i` — HS `PremiseG NodePrem LNFact`.  The
+    /// premise index is the subscript after `▶`.
+    Premise((VarSpec, u64), Fact),
+    /// `splitEqs(N)` — HS `SplitG SplitId`.
+    Split(i64),
+    /// `gf1 ∥ gf2 ∥ ...` — HS `DisjG (Disj LNGuarded)`.  Each disjunct is a
+    /// `plainFormula`; HS's `guardedFormula`
+    /// (Theory/Text/Parser/Formula.hs) turns it into an `LNGuarded`,
+    /// which `tamarin_theory::elaborate::goal_from_parsed` does here.
+    Disj(Vec<Formula>),
+    /// `<small> ⊏ <big>` — HS `SubtermG (LNTerm, LNTerm)`.
+    Subterm(Term, Term),
 }
 
 // =============================================================================
 // Tactics
 // =============================================================================
 
-#[derive(Debug, Clone, PartialEq)]
+/// A single selector function as written in a tactic, e.g. `regex "In_S"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorLeaf {
+    pub name: String,
+    pub params: Vec<String>,
+}
+
+/// A boolean selector expression from one line of a priority block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectorExpr {
+    Leaf(SelectorLeaf),
+    Not(Box<SelectorExpr>),
+    And(Box<SelectorExpr>, Box<SelectorExpr>),
+    Or(Box<SelectorExpr>, Box<SelectorExpr>),
+}
+
+/// A parsed `prio:`/`deprio:` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrioBlock {
+    pub ranking: String,
+    pub selectors: Vec<SelectorExpr>,
+}
+
+/// A structured tactic declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tactic {
     pub name: String,
-    pub raw: String,
+    pub presort: char,
+    pub prios: Vec<PrioBlock>,
+    pub deprios: Vec<PrioBlock>,
 }
 
 // =============================================================================
@@ -531,20 +462,19 @@ pub enum Condition {
 // Facts
 // =============================================================================
 
+/// HS `Fact` ignores its annotations in equality and ordering
+/// (Theory/Model/Fact.hs) and holds them in a `S.Set`, where they
+/// have no order at all; the derive here reads `annotations` as an ordered
+/// list, so this equality is finer than HS's.  Only test assertions compare a
+/// parsed fact — the elaborated `tamarin_theory::fact::Fact` that production
+/// code compares does drop them, through a hand-written `PartialEq` carrying
+/// the same cite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fact {
     pub persistent: bool,
     pub name: String,
     pub args: Vec<Term>,
     pub annotations: Vec<FactAnnotation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum FactAnnotation {
-    SolveFirst,
-    SolveLast,
-    NoSources,
 }
 
 // =============================================================================
@@ -608,7 +538,7 @@ pub enum Term {
     PatMatch(Box<Term>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Exp,     // ^
     Mult,    // *
@@ -626,9 +556,9 @@ impl BinOp {
     /// The string HS `prettyTerm` puts between the operands of this operator.
     ///
     /// The five builtin operators are the literal separators of `prettyTerm`'s
-    /// `ppTerms`/`exp` arms (`*`, `⊕`, `++`, `%+`, `^`; Term/Term.hs:306-310).
+    /// `ppTerms`/`exp` arms (`*`, `⊕`, `++`, `%+`, `^`; Term/Term.hs).
     /// A user-declared `[AC]` symbol is separated by `" " ++ BC.unpack f ++ " "`
-    /// (Term/Term.hs:305), i.e. its name with the spaces included, so that one
+    /// (Term/Term.hs), i.e. its name with the spaces included, so that one
     /// arm owns a `String`.
     ///
     /// This is the single separator table: printers that need a `&'static str`
@@ -646,97 +576,14 @@ impl BinOp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// A variable occurrence: HS `LVar` plus the SAPIC type annotation HS keeps
+/// beside it in `SapicLVar` (Theory/Sapic/Term.hs).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarSpec {
     pub name: String,
     pub idx: u64,
-    pub sort: SortHint,
+    pub sort: LSort,
     pub typ: Option<String>, // SAPIC type annotation
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum SortHint {
-    Msg,
-    Pub,   // $x
-    Fresh, // ~x
-    Node,  // #x
-    Nat,   // %x
-    /// Sort given by suffix `: msg | : pub | : fresh | : node | : nat`.
-    Suffix(SuffixSort),
-    /// No sort hint: bare identifier, sort to be inferred.
-    #[default]
-    Untagged,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum SuffixSort {
-    Msg,
-    Pub,
-    Fresh,
-    Node,
-    Nat,
-}
-
-// =============================================================================
-// Flag formulas (for #ifdef)
-// =============================================================================
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FlagFormula {
-    Atom(String),
-    Not(Box<FlagFormula>),
-    And(Box<FlagFormula>, Box<FlagFormula>),
-    Or(Box<FlagFormula>, Box<FlagFormula>),
-}
-
-/// Hand-written serde for `BinOp` (interned name in `AcFct`), the same way as
-/// `tamarin_term::lterm`'s `serde_impl`.  The name is re-interned in the
-/// parser's own pool.
-#[cfg(feature = "serde")]
-mod serde_impl {
-    use super::BinOp;
-    use crate::parser::intern_ac_name;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    enum BinOpWire<N> {
-        Exp,
-        Mult,
-        Union,
-        Xor,
-        NatPlus,
-        AcFct(N),
-    }
-
-    impl Serialize for BinOp {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let w = match *self {
-                BinOp::Exp => BinOpWire::Exp,
-                BinOp::Mult => BinOpWire::Mult,
-                BinOp::Union => BinOpWire::Union,
-                BinOp::Xor => BinOpWire::Xor,
-                BinOp::NatPlus => BinOpWire::NatPlus,
-                BinOp::AcFct(n) => BinOpWire::AcFct(n),
-            };
-            w.serialize(s)
-        }
-    }
-
-    impl<'de> Deserialize<'de> for BinOp {
-        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            Ok(match BinOpWire::<String>::deserialize(d)? {
-                BinOpWire::Exp => BinOp::Exp,
-                BinOpWire::Mult => BinOp::Mult,
-                BinOpWire::Union => BinOp::Union,
-                BinOpWire::Xor => BinOp::Xor,
-                BinOpWire::NatPlus => BinOp::NatPlus,
-                BinOpWire::AcFct(n) => BinOp::AcFct(intern_ac_name(&n)),
-            })
-        }
-    }
 }
 
 #[cfg(test)]
@@ -744,7 +591,7 @@ mod tests {
     use super::BinOp;
 
     /// The separator strings HS `prettyTerm` puts between operands
-    /// (Term/Term.hs:305-310).  Every printer of a `BinOp` reads them from
+    /// (Term/Term.hs).  Every printer of a `BinOp` reads them from
     /// here, so a typo would move in lockstep across all of them — pin the
     /// table itself.
     #[test]

@@ -6,19 +6,22 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tamarin_parser::ast as p;
-use tamarin_term::function_symbols::{AcFctSym, Constructability, NdcState, NoEqSym, Privacy};
+use tamarin_term::function_symbols::{
+    AcFctSym, AcSym, CSym, Constructability, NdcState, NoEqSym, Privacy,
+};
 use tamarin_term::intern::{intern_bytes, intern_str};
-use tamarin_term::lterm::{LNTerm, LSort, LVar, NameId};
+use tamarin_term::lterm::{BVar, LNTerm, LSort, LVar, NameId};
+use tamarin_term::term::{f_app_ac, f_app_c};
 use tamarin_term::vterm::var_term;
 
 use super::*;
+use crate::atom::Atom;
 use crate::constraint::constraints::{Disj, Goal, LessAtom, Reason};
 use crate::constraint::solver::proof_method::Result as ProofResult;
 use crate::constraint::system::GoalStatus;
-use crate::fact::{proto_fact_ann, FactAnnotation, FactTag, LNFact, Multiplicity};
+use crate::fact::{Fact, FactAnnotation, FactTag, LNFact, Multiplicity};
+use crate::formula::{BLNTerm, Quantifier};
 use crate::guarded::Guarded;
-use crate::guarded_types::{BVar, GAtom, GTerm};
 use crate::rule::ProtoRuleName;
 use crate::tools::equation_store::SplitId;
 use crate::tools::EquationStore;
@@ -36,9 +39,8 @@ fn msg(name: &str, idx: u64) -> LNTerm {
 }
 
 fn annotated_fact() -> LNFact {
-    proto_fact_ann(
-        Multiplicity::Linear,
-        "St_codec",
+    Fact::fresh_annotated(
+        FactTag::Proto(Multiplicity::Linear, intern_str("St_codec"), 2),
         [FactAnnotation::SolveFirst, FactAnnotation::NoSources]
             .into_iter()
             .collect(),
@@ -46,31 +48,54 @@ fn annotated_fact() -> LNFact {
     )
 }
 
-fn gvar(name: &str) -> GTerm {
-    GTerm::Var(BVar::Free(p::VarSpec {
-        name: name.to_string(),
-        idx: 0,
-        sort: p::SortHint::Msg,
-        typ: None,
-    }))
+fn gvar(name: &str) -> BLNTerm {
+    var_term(BVar::Free(LVar::new(name, LSort::Msg, 0)))
 }
 
-/// One `x = y op z` formula per `BinOp` variant, the AC one included.
+fn gbound(i: u64) -> BLNTerm {
+    var_term(BVar::Bound(i))
+}
+
+/// One `x = y op z` formula per AC symbol (the user-defined one included)
+/// plus `em`, then a quantified formula with an annotated action guard over
+/// bound variables, so every kind of formula leaf goes through the codec.
 fn binop_formulas() -> Vec<Arc<Guarded>> {
-    [
-        p::BinOp::Exp,
-        p::BinOp::Mult,
-        p::BinOp::Union,
-        p::BinOp::Xor,
-        p::BinOp::NatPlus,
-        p::BinOp::AcFct("codec_ac"),
+    let ac_fct = AcFctSym::new(
+        "codec_ac",
+        Privacy::Public,
+        Constructability::Constructor,
+        NdcState::IsNdc,
+    );
+    let mut fs: Vec<Arc<Guarded>> = [
+        AcSym::Mult,
+        AcSym::Union,
+        AcSym::Xor,
+        AcSym::NatPlus,
+        AcSym::AcFct(ac_fct),
     ]
     .into_iter()
-    .map(|op| {
-        let rhs = GTerm::BinOp(op, Arc::new(gvar("y")), Arc::new(gvar("z")));
-        Arc::new(Guarded::Atom(GAtom::Eq(gvar("x"), rhs)))
-    })
-    .collect()
+    .map(|op| f_app_ac(op, vec![gvar("y"), gvar("z")]))
+    .chain([f_app_c(CSym::EMap, vec![gvar("y"), gvar("z")])])
+    .map(|rhs| Arc::new(Guarded::Atom(Atom::EqE(gvar("x"), rhs))))
+    .collect();
+    let guard_fact = Fact::fresh_annotated(
+        FactTag::Proto(Multiplicity::Persistent, intern_str("Codec_guard"), 1),
+        [FactAnnotation::SolveLast].into_iter().collect(),
+        vec![gbound(0)],
+    );
+    fs.push(Arc::new(Guarded::GGuarded {
+        qua: Quantifier::All,
+        vars: Arc::from(vec![
+            ("k".to_string(), LSort::Msg),
+            ("i".to_string(), LSort::Node),
+        ]),
+        guards: Arc::from(vec![Atom::Action(gbound(1), guard_fact)]),
+        body: Arc::new(Guarded::Disj(Arc::from(vec![
+            Guarded::Atom(Atom::Last(gbound(1))),
+            Guarded::Atom(Atom::Less(gbound(1), gvar("j"))),
+        ]))),
+    }));
+    fs
 }
 
 /// A system touching each hand-written impl: interned names in variables and
@@ -110,7 +135,6 @@ fn small_system() -> System {
     eq.next_split = SplitId(3);
     sys.set_eq_store(Arc::new(eq));
     sys.next_goal_nr = 5;
-    sys.used_sources = vec!["source_a".to_string()];
     sys
 }
 

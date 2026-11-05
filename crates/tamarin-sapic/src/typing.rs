@@ -1,12 +1,11 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Sapic.Typing` (`lib/sapic/src/Sapic/Typing.hs`) — the
 //! uniqueness-renaming pass (`renameUnique`) and the lightweight type
 //! inference (`typeProcess` / `typeWith`) over SAPIC processes.
 //!
-//! HS pipeline (`typeTheoryEnv`, Typing.hs:204-226):
+//! HS pipeline (`typeTheoryEnv`, Typing.hs):
 //!   for each top-level process:  `renameUnique` then `typeProcess`.
 //! We mirror that in [`type_and_rename_process_in`] (one shared
 //! [`TypingEnvironment`] across processes, driven by
@@ -17,22 +16,25 @@ use std::collections::BTreeMap;
 
 use tamarin_term::function_symbols::{NoEqSym, UserDefinedSym};
 use tamarin_term::lterm::{LSort, LVar, Name};
-use tamarin_term::vterm::{Lit, VTerm};
+use tamarin_term::vterm::{var_term, Lit, VTerm};
 use tamarin_utils::fresh::PreciseFreshState;
 
+use tamarin_theory::formula::{apply_rename, formula_frees};
 use tamarin_theory::sapic::PlainProcess;
 use tamarin_theory::sapic::{
-    Process, ProcessCombinator, SapicAction, SapicLVar, SapicTerm, SapicType,
+    map_process, map_terms_action, map_terms_comb, traverse_terms_action, traverse_terms_comb,
+    Process, ProcessCombinator, ProcessParsedAnnotation, SapicAction, SapicLVar, SapicTerm,
+    SapicType,
 };
 
 use crate::bindings::{bindings_act, bindings_comb};
 
 // =============================================================================
-// renameUnique (Typing.hs:232-269)
+// renameUnique (Typing.hs)
 // =============================================================================
 
 /// `varsProc`: every SAPIC variable that occurs anywhere in `p` (HS
-/// `varsProc = foldMap Data.Set.singleton`, Sapic/Process.hs:361-362 — a Set, so sorted
+/// `varsProc = foldMap Data.Set.singleton`, Sapic/Process.hs — a Set, so sorted
 /// and deduplicated).  We return the underlying `LVar`s used to seed the
 /// avoidance state for `renameUnique`.
 fn proc_lvars(p: &PlainProcess) -> Vec<LVar> {
@@ -130,8 +132,8 @@ fn collect_action_vars(
             // variable occurring ONLY in a restriction still shifts the fresh
             // indices minted for the rest of the process.
             for f in rest {
-                for lv in cond_formula_free_lvars(f) {
-                    out.insert(SapicLVar::untyped(lv));
+                for v in formula_frees(f) {
+                    out.insert(v);
                 }
             }
         }
@@ -166,53 +168,15 @@ fn collect_comb_vars(
         // HS `varsProc = foldMap singleton` over the derived `Foldable (Process)`
         // folds the `v` occurrences inside `Cond (SapicNFormula v)` too — i.e.
         // the formula's FREE variables (bound `BVar` quantifier vars are not
-        // `v`).  Collect them so they seed the `renameUnique` avoidance set.
+        // `v`).  Collect them so they seed the `renameUnique` avoidance set and
+        // reach `type_process_def`'s formals, which print with their tag.
         ProcessCombinator::Cond(f) => {
-            for lv in cond_formula_free_lvars(f) {
-                out.insert(SapicLVar::untyped(lv));
+            for v in formula_frees(f) {
+                out.insert(v);
             }
         }
         ProcessCombinator::Parallel | ProcessCombinator::Ndc => {}
     }
-}
-
-/// Free `LVar`s of a parser-AST process formula — a `Cond` condition or an
-/// MSR's embedded `_restrict` (vars not bound by an enclosing quantifier).
-/// Used to seed the `renameUnique` avoidance set and as the rename domain.
-fn cond_formula_free_lvars(f: &tamarin_parser::ast::Formula) -> Vec<LVar> {
-    let mut out = Vec::new();
-    crate::convert::fold_free_vars(f, &mut |v, _bound| {
-        out.push(LVar::new(
-            v.name.clone(),
-            crate::convert::sort_of_hint(&v.sort),
-            v.idx,
-        ));
-    });
-    out
-}
-
-/// Rename the FREE variables of a parser-AST process formula (a `Cond`
-/// condition or an MSR's embedded `_restrict`) according to `subst`
-/// (`LVar → LVar`), mirroring the `ff = apply subst` argument HS threads into
-/// `mapTermsComb`/`mapTermsAction` (Sapic/Process.hs:155,165).  Quantifier-bound vars
-/// are left untouched (they are not in the subst domain — process renaming only
-/// renames process-bound variables).
-fn rename_cond_formula(
-    subst: &BTreeMap<LVar, LVar>,
-    f: &tamarin_parser::ast::Formula,
-) -> tamarin_parser::ast::Formula {
-    use tamarin_parser::ast as p;
-    crate::convert::map_free_terms(f, &mut |v, _bound| {
-        let key = LVar::new(v.name.clone(), crate::convert::sort_of_hint(&v.sort), v.idx);
-        subst.get(&key).map(|nv| {
-            p::Term::Var(p::VarSpec {
-                name: nv.name.to_string(),
-                idx: nv.idx,
-                sort: v.sort,
-                typ: v.typ.clone(),
-            })
-        })
-    })
 }
 
 /// Rename a SAPIC term's variables according to `subst` (`LVar -> LVar`),
@@ -220,18 +184,13 @@ fn rename_cond_formula(
 /// `apply subst`, where `subst` only ever maps to `varTerm v'` (a renaming),
 /// so a structural LVar→LVar rewrite is faithful.
 fn rename_term(subst: &BTreeMap<LVar, LVar>, t: &SapicTerm) -> SapicTerm {
-    match t {
-        VTerm::Lit(Lit::Var(sv)) => {
+    tamarin_term::term::map_lits(t, &mut |lit| match lit {
+        Lit::Var(sv) => {
             let new_lv = subst.get(&sv.var).copied().unwrap_or(sv.var);
-            VTerm::Lit(Lit::Var(SapicLVar::new(new_lv, sv.stype.clone())))
+            Lit::Var(SapicLVar::new(new_lv, sv.stype.clone()))
         }
-        VTerm::Lit(Lit::Con(c)) => VTerm::Lit(Lit::Con(*c)),
-        VTerm::App(sym, args) => {
-            let new_args: Vec<SapicTerm> = args.iter().map(|a| rename_term(subst, a)).collect();
-            // Rebuild through the smart constructor so AC normal form is kept.
-            tamarin_term::term::f_app(*sym, new_args)
-        }
-    }
+        Lit::Con(c) => Lit::Con(*c),
+    })
 }
 
 fn rename_sv(subst: &BTreeMap<LVar, LVar>, sv: &SapicLVar) -> SapicLVar {
@@ -239,92 +198,35 @@ fn rename_sv(subst: &BTreeMap<LVar, LVar>, sv: &SapicLVar) -> SapicLVar {
     SapicLVar::new(new_lv, sv.stype.clone())
 }
 
-fn rename_fact(
-    subst: &BTreeMap<LVar, LVar>,
-    f: &tamarin_theory::sapic::SapicLNFact,
-) -> tamarin_theory::sapic::SapicLNFact {
-    f.map_ref(|t| rename_term(subst, t))
-}
-
 fn rename_action(
     subst: &BTreeMap<LVar, LVar>,
     a: &SapicAction<SapicLVar>,
 ) -> SapicAction<SapicLVar> {
-    match a {
-        SapicAction::New(v) => SapicAction::New(rename_sv(subst, v)),
-        SapicAction::Event(f) => SapicAction::Event(rename_fact(subst, f)),
-        SapicAction::ChOut { chan, msg } => SapicAction::ChOut {
-            chan: chan.as_ref().map(|t| rename_term(subst, t)),
-            msg: rename_term(subst, msg),
-        },
-        SapicAction::ChIn {
-            chan,
-            msg,
-            match_vars,
-        } => SapicAction::ChIn {
-            chan: chan.as_ref().map(|t| rename_term(subst, t)),
-            msg: rename_term(subst, msg),
-            match_vars: match_vars.iter().map(|v| rename_sv(subst, v)).collect(),
-        },
-        SapicAction::Insert(a, b) => {
-            SapicAction::Insert(rename_term(subst, a), rename_term(subst, b))
-        }
-        SapicAction::Delete(t) => SapicAction::Delete(rename_term(subst, t)),
-        SapicAction::Lock(t) => SapicAction::Lock(rename_term(subst, t)),
-        SapicAction::Unlock(t) => SapicAction::Unlock(rename_term(subst, t)),
-        SapicAction::ProcessCall(n, ts) => SapicAction::ProcessCall(
-            n.clone(),
-            ts.iter().map(|t| rename_term(subst, t)).collect(),
-        ),
-        SapicAction::Msr {
-            prems,
-            acts,
-            concs,
-            rest,
-            match_vars,
-        } => SapicAction::Msr {
-            prems: prems.iter().map(|f| rename_fact(subst, f)).collect(),
-            acts: acts.iter().map(|f| rename_fact(subst, f)).collect(),
-            concs: concs.iter().map(|f| rename_fact(subst, f)).collect(),
-            // HS `mapTermsAction f ff fv (MSR l a r rest mv) = MSR .. (fmap ff
-            // rest) ..` (Sapic/Process.hs:155) maps the embedded restriction formulas
-            // with the SAME substitution as the fact rows, so the formula's free
-            // variables alpha-rename along with the rule body.
-            rest: rest.iter().map(|f| rename_cond_formula(subst, f)).collect(),
-            match_vars: match_vars.iter().map(|v| rename_sv(subst, v)).collect(),
-        },
-        SapicAction::Rep => SapicAction::Rep,
-    }
+    map_terms_action(
+        |t| rename_term(subst, t),
+        // HS `apply subst` on a formula (Sapic/Process.hs) renames the
+        // free variables of an embedded `_restrict` along with the fact rows
+        // that mention them; a bound De Bruijn index and its binder hint cross
+        // unchanged.
+        |f| apply_rename(f.clone(), &mut |v| rename_sv(subst, v)),
+        |v| rename_sv(subst, v),
+        a,
+    )
 }
 
 fn rename_comb(
     subst: &BTreeMap<LVar, LVar>,
     c: &ProcessCombinator<SapicLVar>,
 ) -> ProcessCombinator<SapicLVar> {
-    match c {
-        ProcessCombinator::Lookup(t, v) => {
-            ProcessCombinator::Lookup(rename_term(subst, t), rename_sv(subst, v))
-        }
-        ProcessCombinator::Let {
-            left,
-            right,
-            match_vars,
-        } => ProcessCombinator::Let {
-            left: rename_term(subst, left),
-            right: rename_term(subst, right),
-            match_vars: match_vars.iter().map(|v| rename_sv(subst, v)).collect(),
-        },
-        ProcessCombinator::CondEq(a, b) => {
-            ProcessCombinator::CondEq(rename_term(subst, a), rename_term(subst, b))
-        }
-        // HS `mapTermsComb (apply subst) ... (Cond fa) = Cond (apply subst fa)`
-        // (Sapic/Process.hs:165): rename the formula's free variables.
-        ProcessCombinator::Cond(f) => ProcessCombinator::Cond(rename_cond_formula(subst, f)),
-        other => other.clone(),
-    }
+    map_terms_comb(
+        |t| rename_term(subst, t),
+        |f| apply_rename(f.clone(), &mut |v| rename_sv(subst, v)),
+        |v| rename_sv(subst, v),
+        c,
+    )
 }
 
-/// `renameUnique'` (Typing.hs:242-261).  `subst` is the *outstanding* renaming
+/// `renameUnique'` (Typing.hs).  `subst` is the *outstanding* renaming
 /// applied at this node (`apply initSubst p`); `fresh` mints fresh indices.
 /// For each binder we (1) mint a fresh copy of every bound variable, (2) record
 /// the inverse renaming in the node's `back_substitution` annotation, and
@@ -335,7 +237,7 @@ fn rename_unique_go(
     p: &PlainProcess,
 ) -> PlainProcess {
     // `let p' = apply initSubst p` — apply the outstanding renaming to the
-    // WHOLE subtree (HS Typing.hs:242-261, see line 246); the children inherit the rename, then
+    // WHOLE subtree (HS Typing.hs); the children inherit the rename, then
     // are descended into with only the NEW fresh subst for this node's binders.
     let p_prime = rename_process_full(subst, p);
     match p_prime {
@@ -363,26 +265,27 @@ fn rename_unique_go(
 }
 
 /// `apply subst p` over an entire process subtree (terms + bound vars), used to
-/// mirror HS's `apply initSubst p` (Typing.hs:242-261, see line 246).  Annotations are untouched
-/// here — `renameUnique_go` updates `back_substitution` per node afterwards.
+/// mirror HS's `apply initSubst p` (Typing.hs).
+/// Parsed location annotations are terms too, so they receive the same rename;
+/// `renameUnique_go` updates `back_substitution` per node afterwards.
 fn rename_process_full(subst: &BTreeMap<LVar, LVar>, p: &PlainProcess) -> PlainProcess {
-    match p {
-        Process::Null(ann) => Process::Null(ann.clone()),
-        Process::Action(ac, ann, body) => Process::Action(
-            rename_action(subst, ac),
-            ann.clone(),
-            Box::new(rename_process_full(subst, body)),
-        ),
-        Process::Comb(c, ann, l, r) => Process::Comb(
-            rename_comb(subst, c),
-            ann.clone(),
-            Box::new(rename_process_full(subst, l)),
-            Box::new(rename_process_full(subst, r)),
-        ),
-    }
+    map_process(
+        p,
+        &mut |action| rename_action(subst, action),
+        &mut |comb| rename_comb(subst, comb),
+        &mut |ann| rename_annotation(subst, ann),
+    )
 }
 
-/// `mkSubst` (Typing.hs:266-272): for each bound variable mint a fresh LVar
+fn rename_annotation(
+    subst: &BTreeMap<LVar, LVar>,
+    ann: &ProcessParsedAnnotation,
+) -> ProcessParsedAnnotation {
+    ann.clone()
+        .map_location(|location| rename_term(subst, &location))
+}
+
+/// `mkSubst` (Typing.hs): for each bound variable mint a fresh LVar
 /// copy (`freshLVar name sort`), returning the forward renaming `(v -> v')`
 /// and the inverse `(v' -> v)` as a `Subst Name LVar` for back-substitution.
 fn mk_subst(
@@ -395,16 +298,16 @@ fn mk_subst(
         let lv = &sv.var;
         let v_new = tamarin_term::lterm::fresh_lvar(fresh, lv.name, lv.sort);
         fwd.insert(*lv, v_new);
-        inv_pairs.push((v_new, VTerm::Lit(Lit::Var(*lv))));
+        inv_pairs.push((v_new, var_term(*lv)));
     }
     let inv = tamarin_term::subst::Subst::from_list(inv_pairs);
     (fwd, inv)
 }
 
-/// `renameUnique` (Typing.hs:232-240): seed the fresh-var supply so it avoids
+/// `renameUnique` (Typing.hs): seed the fresh-var supply so it avoids
 /// every variable already present, then run `renameUnique'` from the identity
 /// substitution.
-pub fn rename_unique(p: &PlainProcess) -> PlainProcess {
+pub(crate) fn rename_unique(p: &PlainProcess) -> PlainProcess {
     let avoid: Vec<(String, u64)> = proc_lvars(p)
         .into_iter()
         .map(|lv| (lv.name.to_string(), lv.idx))
@@ -415,24 +318,24 @@ pub fn rename_unique(p: &PlainProcess) -> PlainProcess {
 }
 
 // =============================================================================
-// Type inference (typeProcess / typeWith, Typing.hs:73-200)
+// Type inference (typeProcess / typeWith, Typing.hs)
 // =============================================================================
 
-/// `TypingEnvironment` (Typing.hs:55-59).
+/// `TypingEnvironment` (Typing.hs).
 /// `funs` is keyed by `UserDefinedSym`, so a user-defined AC symbol has a
 /// typing entry alongside the free ones.  `events` records, per event fact
 /// tag, the inferred argument types of its LAST typed occurrence (HS
-/// `Map.insert tag …`, Typing.hs:149 — later events overwrite earlier ones).
+/// `Map.insert tag …`, Typing.hs — later events overwrite earlier ones).
 /// `events` has no RS reader: its consumer is `loadHeaders`'
-/// `event e(t1,…)` emission (Export.hs:2743-2754), part of the unported
-/// export backends — see `tamarin_export`'s module doc.
+/// `event e(t1,…)` emission (Export.hs), part of the unported
+/// ProVerif / DeepSec export backends.
 pub struct TypingEnvironment {
     pub vars: BTreeMap<LVar, SapicType>,
     pub funs: BTreeMap<UserDefinedSym, (Vec<SapicType>, SapicType)>,
     pub events: BTreeMap<tamarin_theory::fact::FactTag, Vec<SapicType>>,
 }
 
-/// `smallerType` (Typing.hs:32-35).
+/// `smallerType` (Typing.hs).
 fn smaller_type(t1: &SapicType, t2: &SapicType) -> bool {
     match (t1, t2) {
         (_, None) => true,
@@ -441,7 +344,7 @@ fn smaller_type(t1: &SapicType, t2: &SapicType) -> bool {
     }
 }
 
-/// `sqcap` (Typing.hs:45-49): more specific of two types, error if they clash.
+/// `sqcap` (Typing.hs): more specific of two types, error if they clash.
 fn sqcap(t1: &SapicType, t2: &SapicType) -> Result<SapicType, String> {
     if smaller_type(t1, t2) {
         Ok(t1.clone())
@@ -452,12 +355,12 @@ fn sqcap(t1: &SapicType, t2: &SapicType) -> Result<SapicType, String> {
     }
 }
 
-/// `defaultFunctionType n = (replicate n Nothing, Nothing)` (Typing.hs:52-53, see line 53).
+/// `defaultFunctionType n = (replicate n Nothing, Nothing)` (Typing.hs).
 fn default_function_type(n: usize) -> (Vec<SapicType>, SapicType) {
     (vec![None; n], None)
 }
 
-/// True iff `fs` is a `viewTerm2`-SPECIAL NoEq symbol (Term/Raw.hs:191-204):
+/// True iff `fs` is a `viewTerm2`-SPECIAL NoEq symbol (Term/Raw.hs):
 /// `pair`, `exp`, `pmult`, `diff`, `inv`, `one`, `natOne`, `dhNeutral`.  HS's
 /// `viewTerm2` renders these as dedicated constructors (`FPair`/`FExp`/…) rather
 /// than `FAppNoEq`, so `typeWith` treats them via the polymorphic `viewTerm`
@@ -479,7 +382,7 @@ fn is_special_viewterm2_sym(fs: &NoEqSym) -> bool {
         || (n == DH_NEUTRAL_SYM_STRING && fs.arity == 0)
 }
 
-/// `typeWith` (Typing.hs:63-124).  Types term `t` against target `tt`,
+/// `typeWith` (Typing.hs).  Types term `t` against target `tt`,
 /// returning the typed term and its inferred type, updating `env`.
 fn type_with(
     env: &mut TypingEnvironment,
@@ -500,10 +403,7 @@ fn type_with(
             };
             let merged = sqcap(&stype, tt)?;
             env.vars.insert(*lvar, merged.clone());
-            Ok((
-                VTerm::Lit(Lit::Var(SapicLVar::new(*lvar, merged.clone()))),
-                merged,
-            ))
+            Ok((var_term(SapicLVar::new(*lvar, merged.clone())), merged))
         }
         VTerm::App(sym, args) => {
             use tamarin_term::function_symbols::FunSym;
@@ -511,10 +411,10 @@ fn type_with(
                 // HS `typeWith` dispatches on `viewTerm2 t`: a NoEq application
                 // whose head is one of the SPECIAL symbols (`pair`, `exp`, `inv`,
                 // `pmult`, `diff`, `one`, `natOne`, `dhNeutral`) does NOT view as
-                // `FAppNoEq` (Term/Raw.hs:191-204) — it views as its own
+                // `FAppNoEq` (Term/Raw.hs) — it views as its own
                 // constructor (`FPair`, `FExp`, …).  None of those match the
-                // `FAppNoEq fs ts` case (Typing.hs:63-124, see line 83), so they fall through to
-                // the polymorphic `FApp fs ts <- viewTerm t` branch (Typing.hs:63-124, see line 102)
+                // `FAppNoEq fs ts` case (Typing.hs), so they fall through to
+                // the polymorphic `FApp fs ts <- viewTerm t` branch (Typing.hs)
                 // which types arguments with `Nothing` and learns NO function
                 // type.  Crucially this means pairs (`<a,b>`) do NOT back-propagate
                 // an argument type onto `a`/`b` — matching HS, which keeps
@@ -522,7 +422,7 @@ fn type_with(
                 FunSym::NoEq(fs) if !is_special_viewterm2_sym(fs) => {
                     let n = fs.arity;
                     // HS keys the typing environment by `NoEqUser fs`
-                    // (Typing.hs:63-124, see line 83).
+                    // (Typing.hs).
                     let key = UserDefinedSym::NoEqUser(*fs);
                     // First pass: refine output type from target.
                     let (intypes1, outtype1) = get_fun(env, n, &key);
@@ -603,8 +503,8 @@ fn merge_fun_types(
     Ok((ins, out))
 }
 
-/// `typeProcess` (Typing.hs:135-168) via `traverseProcess`
-/// (Sapic/Process.hs:221-234):
+/// `typeProcess` (Typing.hs) via `traverseProcess`
+/// (Sapic/Process.hs):
 ///   1. `fAct`/`fComb` — insert this node's bound vars (PRE-order, on the way
 ///      down);
 ///   2. recurse into the subtree (`p''<- traverseProcess … p'`);
@@ -628,7 +528,7 @@ fn type_process(env: &mut TypingEnvironment, p: &PlainProcess) -> Result<PlainPr
             let body1 = type_process(env, body)?;
             // 3. gAct: type the action's terms, with the now-complete `env`.
             let ac1 = type_action(env, ac)?;
-            // The `gAct ac@(Event (Fact tag _ ts))` case (Typing.hs:145-150):
+            // The `gAct ac@(Event (Fact tag _ ts))` case (Typing.hs):
             // after `traverseTermsAction` produced the typed action, the
             // ORIGINAL argument terms are typed a second time (`argTypes <-
             // mapM (`typeWith` Nothing) ts`) and their result TYPES recorded
@@ -658,7 +558,7 @@ fn type_process(env: &mut TypingEnvironment, p: &PlainProcess) -> Result<PlainPr
     }
 }
 
-/// `insertVar` (Typing.hs:162-167).
+/// `insertVar` (Typing.hs).
 fn insert_var(env: &mut TypingEnvironment, v: &SapicLVar) -> Result<(), String> {
     if env.vars.contains_key(&v.var) {
         return Err(format!("variable bound twice: {:?}", v.var));
@@ -667,7 +567,7 @@ fn insert_var(env: &mut TypingEnvironment, v: &SapicLVar) -> Result<(), String> 
     Ok(())
 }
 
-/// `typeWithVar` (Typing.hs:158-160): a standalone bound variable is already
+/// `typeWithVar` (Typing.hs): a standalone bound variable is already
 /// correctly typed; if untyped, give it `defaultSapicType` (= `Nothing`).
 fn type_with_var(v: &SapicLVar) -> SapicLVar {
     match &v.stype {
@@ -676,111 +576,40 @@ fn type_with_var(v: &SapicLVar) -> SapicLVar {
     }
 }
 
-/// `traverseTermsAction` (Sapic/Process.hs:242-268) specialised to the typing
-/// handlers `typeWith'` (terms), `typeWithVar` (standalone vars).
+/// `traverseTermsAction (typeWith' ..) typeWithFact typeWithVar`
+/// (Typing.hs).  `typeWithFact = return` (Typing.hs) leaves an
+/// MSR's embedded `_restrict` formulas untyped, because a quantified variable
+/// has no entry in `env.vars`.
 fn type_action(
     env: &mut TypingEnvironment,
     a: &SapicAction<SapicLVar>,
 ) -> Result<SapicAction<SapicLVar>, String> {
-    match a {
-        SapicAction::New(v) => Ok(SapicAction::New(type_with_var(v))),
-        // `Event <$> traverse ft fa` (Sapic/Process.hs:257): the event fact's TERMS
-        // are typed via `ft = typeWith'` — NOT `typeWithFact` (which only
-        // handles MSR's `rest` formulas).  This is what propagates `:lol` onto
-        // the `Test( x.1 )` references.
-        SapicAction::Event(f) => Ok(SapicAction::Event(type_event_fact(env, f)?)),
-        SapicAction::ChOut { chan, msg } => Ok(SapicAction::ChOut {
-            chan: chan.as_ref().map(|t| type_term(env, t)).transpose()?,
-            msg: type_term(env, msg)?,
-        }),
-        SapicAction::ChIn {
-            chan,
-            msg,
-            match_vars,
-        } => Ok(SapicAction::ChIn {
-            chan: chan.as_ref().map(|t| type_term(env, t)).transpose()?,
-            msg: type_term(env, msg)?,
-            match_vars: match_vars.iter().map(type_with_var).collect(),
-        }),
-        SapicAction::Insert(a, b) => {
-            Ok(SapicAction::Insert(type_term(env, a)?, type_term(env, b)?))
-        }
-        SapicAction::Delete(t) => Ok(SapicAction::Delete(type_term(env, t)?)),
-        SapicAction::Lock(t) => Ok(SapicAction::Lock(type_term(env, t)?)),
-        SapicAction::Unlock(t) => Ok(SapicAction::Unlock(type_term(env, t)?)),
-        SapicAction::ProcessCall(n, ts) => Ok(SapicAction::ProcessCall(
-            n.clone(),
-            ts.iter()
-                .map(|t| type_term(env, t))
-                .collect::<Result<_, _>>()?,
-        )),
-        SapicAction::Msr {
-            prems,
-            acts,
-            concs,
-            rest,
-            match_vars,
-        } => Ok(SapicAction::Msr {
-            prems: prems
-                .iter()
-                .map(|f| type_event_fact(env, f))
-                .collect::<Result<_, _>>()?,
-            acts: acts
-                .iter()
-                .map(|f| type_event_fact(env, f))
-                .collect::<Result<_, _>>()?,
-            concs: concs
-                .iter()
-                .map(|f| type_event_fact(env, f))
-                .collect::<Result<_, _>>()?,
-            // `rest` formulas use `typeWithFact = return` (Typing.hs:135-168, see line 161) — left
-            // untyped, matching HS.
-            rest: rest.clone(),
-            match_vars: match_vars.iter().map(type_with_var).collect(),
-        }),
-        SapicAction::Rep => Ok(SapicAction::Rep),
-    }
+    traverse_terms_action(
+        |t| type_term(env, t),
+        |f| Ok(f.clone()),
+        |v| Ok(type_with_var(v)),
+        a,
+    )
 }
 
+/// `traverseTermsComb (typeWith' ..) typeWithFact typeWithVar`
+/// (Typing.hs).
 fn type_comb(
     env: &mut TypingEnvironment,
     c: &ProcessCombinator<SapicLVar>,
 ) -> Result<ProcessCombinator<SapicLVar>, String> {
-    match c {
-        ProcessCombinator::Lookup(t, v) => Ok(ProcessCombinator::Lookup(
-            type_term(env, t)?,
-            type_with_var(v),
-        )),
-        ProcessCombinator::Let {
-            left,
-            right,
-            match_vars,
-        } => Ok(ProcessCombinator::Let {
-            left: type_term(env, left)?,
-            right: type_term(env, right)?,
-            match_vars: match_vars.iter().map(type_with_var).collect(),
-        }),
-        ProcessCombinator::CondEq(a, b) => Ok(ProcessCombinator::CondEq(
-            type_term(env, a)?,
-            type_term(env, b)?,
-        )),
-        other => Ok(other.clone()),
-    }
+    traverse_terms_comb(
+        |t| type_term(env, t),
+        |f| Ok(f.clone()),
+        |v| Ok(type_with_var(v)),
+        c,
+    )
 }
 
-/// `typeWith' t = fst <$> typeWith t Nothing` (Typing.hs:135-168, see line 157).
+/// `typeWith' t = fst <$> typeWith t Nothing` (Typing.hs).
 fn type_term(env: &mut TypingEnvironment, t: &SapicTerm) -> Result<SapicTerm, String> {
     let (t1, _) = type_with(env, t, &None)?;
     Ok(t1)
-}
-
-/// Type every term of a fact via `ft = typeWith'` — this is the `traverse ft fa`
-/// path used by `traverseTermsAction` for `Event` (and per-fact terms in MSR).
-fn type_event_fact(
-    env: &mut TypingEnvironment,
-    f: &tamarin_theory::sapic::SapicLNFact,
-) -> Result<tamarin_theory::sapic::SapicLNFact, String> {
-    f.try_map_ref(|t| type_term(env, t))
 }
 
 // =============================================================================
@@ -790,19 +619,18 @@ fn type_event_fact(
 /// A user `functions:` typing declaration — the function name, its declared
 /// argument types and return type (HS `SapicFunSym = (UserDefinedSym,
 /// [SapicType], SapicType)`, the payload of `theoryFunctionTypingInfos`).
-pub type UserFunTyping = (String, Vec<SapicType>, SapicType);
+pub(crate) type UserFunTyping = (String, Vec<SapicType>, SapicType);
 
-/// `toSapicTerm` (Typing.hs:173-178): re-tag an `LNTerm`'s variables as
+/// `toSapicTerm` (Typing.hs): re-tag an `LNTerm`'s variables as
 /// untyped `SapicLVar`s (a structure-preserving `fmap`).
 fn to_sapic_term(t: &tamarin_term::lterm::LNTerm) -> SapicTerm {
-    match t {
-        VTerm::Lit(Lit::Var(v)) => VTerm::Lit(Lit::Var(SapicLVar::untyped(*v))),
-        VTerm::Lit(Lit::Con(c)) => VTerm::Lit(Lit::Con(*c)),
-        VTerm::App(sym, args) => VTerm::App(*sym, args.iter().map(to_sapic_term).collect()),
-    }
+    tamarin_term::term::map_lits(t, &mut |lit| match lit {
+        Lit::Var(v) => Lit::Var(SapicLVar::untyped(*v)),
+        Lit::Con(c) => Lit::Con(*c),
+    })
 }
 
-/// `typeTermsWithEnv` (Typing.hs:128-134): type a term list against `env`,
+/// `typeTermsWithEnv` (Typing.hs): type a term list against `env`,
 /// ignoring unbound variables by first (re)binding every free variable of the
 /// terms to `Nothing` (HS `Map.insert x Nothing` — an OVERWRITE, so a
 /// previously learnt var type is reset).  Updates `env.funs` with whatever the
@@ -821,7 +649,7 @@ fn type_terms_with_env(env: &mut TypingEnvironment, terms: &[SapicTerm]) -> Resu
     Ok(())
 }
 
-/// `typeRule` (Typing.hs:179-181): type both sides of a subterm rewrite rule
+/// `typeRule` (Typing.hs): type both sides of a subterm rewrite rule
 /// (`ctxtStRuleToRRule r = lhs `RRule` rhs`) via [`type_terms_with_env`].
 fn type_rule(
     env: &mut TypingEnvironment,
@@ -831,11 +659,11 @@ fn type_rule(
     type_terms_with_env(env, &[to_sapic_term(&rr.lhs), to_sapic_term(&rr.rhs)])
 }
 
-/// `initTEFromSig` (Typing.hs:183-201): seed every signature function symbol —
+/// `initTEFromSig` (Typing.hs): seed every signature function symbol —
 /// the free ones (`stFunSyms`) with `defaultFunctionType` of their arity and the
 /// user-defined AC ones (`stACFunSyms`) with `defaultFunctionType 2` — THEN
 /// overlay the user-declared function typings (`withUserDefinedFuns`,
-/// Typing.hs:195).  The user typings carry the declared argument / return types
+/// Typing.hs).  The user typings carry the declared argument / return types
 /// (e.g. `f(bitstring):bitstring`) that `typeWith` propagates onto the bound
 /// variables.  Finally `foldM typeRule initTE sigRules` types every subterm
 /// rewrite rule (`stRules`) of the signature, so declared function types
@@ -843,7 +671,7 @@ fn type_rule(
 /// variables remain in `vars` — HS clears `vars` per process, not here).
 ///
 /// This is the environment `typeTheoryEnv` seeds before threading it through
-/// every process (Typing.hs:207).
+/// every process (Typing.hs).
 pub(crate) fn init_te_from_sig(
     maude_sig: &tamarin_term::maude_sig::MaudeSig,
     user_fun_typings: &[UserFunTyping],
@@ -899,7 +727,7 @@ pub(crate) fn init_te_from_sig(
     Ok(env)
 }
 
-/// `typeAndRenameProcess` as run inside `typeTheoryEnv` (Typing.hs:213-216):
+/// `typeAndRenameProcess` as run inside `typeTheoryEnv` (Typing.hs):
 /// `renameUnique`, clear the per-process `vars` map (`modify' (\s -> s { vars
 /// = Map.empty})`), then `typeProcess` — against a SHARED environment whose
 /// `funs`/`events` accumulate across processes.
@@ -914,7 +742,7 @@ pub(crate) fn type_and_rename_process_in(
 
 /// Single-process convenience wrapper: a fresh environment per call.
 /// Equivalent to HS `typeTheory` on a theory holding exactly one process.
-pub fn type_and_rename_process(
+pub(crate) fn type_and_rename_process(
     maude_sig: &tamarin_term::maude_sig::MaudeSig,
     user_fun_typings: &[UserFunTyping],
     p: &PlainProcess,
@@ -923,7 +751,7 @@ pub fn type_and_rename_process(
     type_and_rename_process_in(&mut env, p)
 }
 
-/// `S.toList (varsProc p)` (Sapic/Process.hs:361-362): every SAPIC variable that
+/// `S.toList (varsProc p)` (Sapic/Process.hs): every SAPIC variable that
 /// occurs anywhere in `p`, as the sorted deduplicated `Set` list.  Two
 /// occurrences of the same `LVar` under DIFFERENT `stype` tags are distinct
 /// set elements, exactly as in HS.  Generic in the annotation, as HS's
@@ -934,22 +762,21 @@ pub(crate) fn vars_proc<A>(p: &Process<A, SapicLVar>) -> Vec<SapicLVar> {
     set.into_iter().collect()
 }
 
-/// Collect the user `functions:` typing declarations of a parsed theory (HS
-/// `theoryFunctionTypingInfos`; every parsed `FunctionDecl` becomes a
-/// `FunctionTypingInfo` item, Theory/Text/Parser.hs:259-262 `addFunctionTypingInfo`)
-/// as the `(name, arg_types, out_type)` triples [`init_te_from_sig`] overlays.
-/// Plain `f/2` declarations carry `Nothing` types (the `defaultFunctionType`),
-/// which the typing env already holds — so they are harmless overlays.
-pub(crate) fn collect_user_fun_typings(parsed: &tamarin_parser::ast::Theory) -> Vec<UserFunTyping> {
-    let mut out = Vec::new();
-    for item in &parsed.items {
-        if let tamarin_parser::ast::TheoryItem::Functions(decls) = item {
-            for d in decls {
-                out.push((d.name.clone(), d.arg_types.clone(), d.out_type.clone()));
-            }
-        }
-    }
-    out
+/// The theory's `FunctionTypingInfo` items (HS `theoryFunctionTypingInfos`,
+/// TheoryObject.hs) as the `(name, arg_types, out_type)` triples
+/// [`init_te_from_sig`] overlays.  Plain `f/2` declarations carry `Nothing`
+/// types (the `defaultFunctionType`), which the typing env already holds — so
+/// they are harmless overlays.
+pub(crate) fn collect_user_fun_typings(thy: &tamarin_theory::theory::Theory) -> Vec<UserFunTyping> {
+    thy.function_typing_infos()
+        .map(|fs| {
+            (
+                String::from_utf8_lossy(fs.sym.name()).into_owned(),
+                fs.arg_types.clone(),
+                fs.out_type.clone(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -979,6 +806,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rename_unique_renames_location_terms() {
+        let mut body_ann = ProcessParsedAnnotation::empty();
+        body_ann.location = Some(var_term(slv("x", 0, None)));
+        let proc = Process::Action(
+            SapicAction::New(slv("x", 0, None)),
+            ProcessParsedAnnotation::empty(),
+            Box::new(Process::Null(body_ann)),
+        );
+
+        let Process::Action(_, _, body) = rename_unique(&proc) else {
+            panic!("expected New action");
+        };
+        assert_eq!(
+            body.annotation().location,
+            Some(var_term(slv("x", 1, None)))
+        );
+    }
+
     /// An MSR's embedded `_restrict(...)` alpha-renames with the rest of the
     /// rule body: HS maps the formula list with the SAME substitution as the
     /// fact rows (`mapTermsAction f ff fv (MSR ..) = MSR .. (fmap ff rest) ..`).
@@ -990,24 +836,21 @@ mod tests {
     ///   `_restrict(k.1 = 'b')` — index 1, matching the renamed `Ev( k.1 )`.
     #[test]
     fn rename_unique_renames_msr_embedded_restriction() {
-        use tamarin_parser::ast as p;
+        use tamarin_theory::atom::ProtoAtom;
+        use tamarin_theory::formula::ProtoFormula;
 
-        let k = || {
-            p::Term::Var(p::VarSpec {
-                typ: None,
-                name: "k".into(),
-                sort: p::SortHint::Msg,
-                idx: 0,
-            })
-        };
-        let restr = p::Formula::Atom(p::Atom::Eq(k(), p::Term::PubLit("b".into())));
+        // `k = 'b'`, with `k` the process variable the enclosing `new` binds.
+        let restr = ProtoFormula::Atom(ProtoAtom::EqE(
+            var_term(tamarin_term::lterm::BVar::Free(slv("k", 0, None))),
+            VTerm::Lit(Lit::Con(Name::new(tamarin_term::lterm::NameTag::Pub, "b"))),
+        ));
         let ev = tamarin_theory::fact::Fact::new(
             tamarin_theory::fact::FactTag::Proto(
                 tamarin_theory::fact::Multiplicity::Linear,
                 "Ev",
                 1,
             ),
-            vec![VTerm::Lit(Lit::Var(slv("k", 0, None)))],
+            vec![var_term(slv("k", 0, None))],
         );
         let msr = Process::Action(
             SapicAction::Msr {
@@ -1036,20 +879,18 @@ mod tests {
         // The action row renamed...
         assert_eq!(
             acts[0].terms[0],
-            VTerm::Lit(Lit::Var(slv("k", 1, None))),
+            var_term(slv("k", 1, None)),
             "Ev's argument must be k.1"
         );
         // ...and so did the embedded restriction.
-        let p::Formula::Atom(p::Atom::Eq(lhs, _)) = &rest[0] else {
-            panic!("expected an equality restriction");
-        };
-        let p::Term::Var(v) = lhs else {
-            panic!("expected a variable on the left");
-        };
-        assert_eq!((v.name.as_str(), v.idx), ("k", 1));
+        assert_eq!(
+            formula_frees(&rest[0]),
+            vec![slv("k", 1, None)],
+            "the restriction's only free variable must be k.1"
+        );
     }
 
-    /// The `gAct Event` case (Typing.hs:145-150) records the event's inferred
+    /// The `gAct Event` case (Typing.hs) records the event's inferred
     /// argument types in `env.events`, keyed by the fact tag.
     #[test]
     fn typing_records_event_arg_types_in_env() {
@@ -1058,7 +899,7 @@ mod tests {
         let x = slv("x", 0, Some("lol"));
         let run = Fact::new(
             FactTag::Proto(Multiplicity::Linear, "Run", 1),
-            vec![VTerm::Lit(Lit::Var(slv("x", 0, None)))],
+            vec![var_term(slv("x", 0, None))],
         );
         let proc = Process::Action(
             SapicAction::New(x),
@@ -1082,8 +923,7 @@ mod tests {
         );
     }
 
-    /// `initTEFromSig`'s `foldM typeRule initTE sigRules` (Typing.hs:185,
-    /// 179-181): typing the signature's subterm rewrite rules propagates a
+    /// `initTEFromSig`'s `foldM typeRule initTE sigRules` (Typing.hs): typing the signature's subterm rewrite rules propagates a
     /// DECLARED function type through an equation onto another symbol.  Here
     /// `g(f(x)) = x` with `f(bitstring):bitstring` teaches `g` the argument
     /// type `bitstring` (from `f`'s output type).
@@ -1092,7 +932,6 @@ mod tests {
         use tamarin_term::function_symbols::{Constructability, FunSym, Privacy};
         use tamarin_term::subterm_rule::{CtxtStRule, StRhs};
         use tamarin_term::term::f_app;
-        use tamarin_term::vterm::var_term;
 
         let f = NoEqSym::new(
             b"f".to_vec(),

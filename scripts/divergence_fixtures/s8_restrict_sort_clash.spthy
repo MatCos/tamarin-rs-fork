@@ -1,0 +1,31 @@
+// A rule variable that only the rule's `_restrict` formula mentions.
+//
+// `liftedAddProtoRule` (Theory/Text/Parser.hs) leaves the `_restrict`
+// formula in the rule's `_preRestriction` field (Theory/Model/Rule.hs) and
+// adds the action fact `fromRuleRestriction` builds
+// (Theory/Model/Restriction.hs).  That fact carries the formula's free
+// variables minus `varNow` (Theory/Model/Restriction.hs), so
+// `#NOW` is the one variable a `_restrict` can introduce that reaches no fact
+// of the rule.
+//
+// `ruleSortsReport` (Theory/Tools/Wellformedness.hs) folds the whole
+// rule through `frees`; `HasFrees (Rule i)` folds the rule info first
+// (Theory/Model/Rule.hs) and `HasFrees ProtoRuleEInfo`
+// (Theory/Model/Rule.hs) folds the restrictions inside it.  `~now` and
+// `#NOW` share a lowercased name and an index and differ in sort, so
+// `sortsClashCheck` (Theory/Tools/Wellformedness.hs) groups them.
+//
+// Mode `match`: the two engines agree on this shape.
+//
+// Compared slice: the wf report block.
+
+
+theory S8RestrictSortClash
+begin
+
+rule R:
+  [ Fr(~now) ]
+  --[ _restrict( Ex #j. A() @ #j & #j < #NOW ) ]->
+  [ Out(~now) ]
+
+end

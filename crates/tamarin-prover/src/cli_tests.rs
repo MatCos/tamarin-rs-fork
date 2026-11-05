@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Tests for the clap CLI.
 //!
@@ -136,14 +135,15 @@ fn repeated_scalar_flags_are_last_wins() {
     // HS cmdargs is last-occurrence-wins for scalar flags (`findArg`
     // reads the head of a prepend-updated list); `args_override_self`
     // mirrors that.  The repeatable flags (`--prove`/`--lemma`/`-D`)
-    // still append.
+    // keep every occurrence, `--prove`/`--lemma` in the reverse order
+    // `findArg` reads them off the prepend-built list.
     let a = parse(&["-b=5", "-b=7", "x.spthy"]);
     assert_eq!(a.bound, Some(7));
     let a = parse(&["--heuristic=s", "--heuristic=C", "x.spthy"]);
     assert_eq!(a.heuristic.as_deref(), Some("C"));
     let a = parse(&["--prove=a", "-m=spthy", "-m=msr", "--prove=b", "x.spthy"]);
     assert_eq!(a.output_module.as_deref(), Some("msr"));
-    assert_eq!(a.lemma_names, vec!["a", "b"]);
+    assert_eq!(a.lemma_names, vec!["b", "a"]);
 }
 
 #[test]
@@ -194,18 +194,28 @@ fn prove_bare_means_all() {
 
 #[test]
 fn prove_repeated() {
+    // `findArg "prove"` reads one flag's values off the prepend-built
+    // `Arguments` list, so they arrive in reverse command-line order.
     let a = parse(&["--prove=foo", "--prove=bar*", "x.spthy"]);
-    assert_eq!(a.lemma_names, vec!["foo", "bar*"]);
+    assert_eq!(a.lemma_names, vec!["bar*", "foo"]);
 }
 
 #[test]
 fn lemma_flag_appends_after_prove_names() {
-    // `parse_args` concatenates `--prove` values then `--lemma` values;
-    // `--lemma` alone does not set prove_mode (it only restricts what
-    // `--prove` proves).
+    // `lemma_names` is HS `findArg "prove" as ++ findArg "lemma" as`, so
+    // the `--prove` values come first; `--lemma` alone does not set
+    // prove_mode (it only restricts what `--prove` proves).
     let a = parse(&["--prove=a", "--lemma=b", "x.spthy"]);
     assert!(a.prove_mode);
     assert_eq!(a.lemma_names, vec!["a", "b"]);
+    let a = parse(&[
+        "--prove=p1",
+        "--lemma=l1",
+        "--prove=p2",
+        "--lemma=l2",
+        "x.spthy",
+    ]);
+    assert_eq!(a.lemma_names, vec!["p2", "p1", "l2", "l1"]);
     let a = parse(&["--lemma=b", "x.spthy"]);
     assert!(!a.prove_mode);
     assert_eq!(a.lemma_names, vec!["b"]);
@@ -623,6 +633,125 @@ fn interface_and_web_flags() {
 // =========================================================================
 
 #[test]
+fn batch_tamarin_rts_command() {
+    let a = parse(&[
+        "+RTS",
+        "-N4",
+        "-RTS",
+        "x.spthy",
+        "--prove=chain",
+        "-D=TEST",
+        "--output-json=traces/task.json",
+        "--output-dot=traces/task.dot",
+        "--output=out.spthy",
+    ]);
+    assert_eq!(a.processors, Some(4));
+    assert_eq!(a.effective_processors(), 4);
+    assert_eq!(a.effective_maude_processes(), 4);
+    assert_eq!(a.in_files, ["x.spthy"]);
+    assert!(a.prove_mode);
+    assert_eq!(a.lemma_names, ["chain"]);
+    assert_eq!(a.defines, ["TEST"]);
+    assert_eq!(a.trace_json.as_deref(), Some("traces/task.json"));
+    assert_eq!(a.trace_dot.as_deref(), Some("traces/task.dot"));
+    assert_eq!(a.output_file.as_deref(), Some("out.spthy"));
+}
+
+#[test]
+fn rts_blocks_anywhere_and_last_processor_setting_wins() {
+    for argv in [
+        vec!["x.spthy", "+RTS", "-N2"],
+        vec!["+RTS", "-N1", "-RTS", "x.spthy", "+RTS", "-N2", "-RTS"],
+        vec!["--processors=1", "x.spthy", "+RTS", "-N2"],
+        vec!["+RTS", "-N1", "-RTS", "x.spthy", "--processors=2"],
+        vec!["x.spthy", "+RTS", "-N1", "-N2"],
+    ] {
+        let a = parse(&argv);
+        assert_eq!(a.processors, Some(2), "{argv:?}");
+        assert_eq!(a.in_files, ["x.spthy"]);
+    }
+    let a = parse(&["interactive", ".", "+RTS", "-N2"]);
+    assert_eq!(a.subcommand, Subcommand::Interactive);
+    assert_eq!(a.processors, Some(2));
+    let a = parse(&["x.spthy", "--processors=1", "+RTS", "-N"]);
+    assert_eq!(
+        a.effective_processors(),
+        Args::default().effective_processors()
+    );
+    let a = parse(&["x.spthy", "+RTS", "-N1", "-RTS", "--maude-processes=8"]);
+    assert_eq!(a.effective_maude_processes(), 1);
+}
+
+#[test]
+fn rts_blocks_do_not_interrupt_native_option_values() {
+    let a = parse(&[
+        "--output-json",
+        "+RTS",
+        "-N2",
+        "-RTS",
+        "traces.json",
+        "x.spthy",
+    ]);
+    assert_eq!(a.trace_json.as_deref(), Some("traces.json"));
+    assert_eq!(a.processors, Some(2));
+    assert_eq!(a.in_files, ["x.spthy"]);
+    // Last flag occurrence wins even if its value follows an RTS block.
+    assert_eq!(
+        parse(&["--processors", "+RTS", "-N2", "-RTS", "1", "x.spthy"]).processors,
+        Some(2)
+    );
+    assert_eq!(
+        parse(&["+RTS", "-N2", "--RTS", "--processors", "1", "x.spthy"]).processors,
+        Some(1)
+    );
+    // A positional that looks like a native flag cannot override RTS settings.
+    assert_eq!(
+        parse(&["+RTS", "-N2", "--", "--processors=1"]).processors,
+        Some(2)
+    );
+}
+
+#[test]
+fn rts_terminators_preserve_application_arguments() {
+    let a = parse(&["+RTS", "-N2", "--RTS", "--prove", "x.spthy", "+RTS"]);
+    assert_eq!(a.processors, Some(2));
+    assert!(a.prove_mode);
+    assert_eq!(a.in_files, ["x.spthy", "+RTS"]);
+    let a = parse(&["+RTS", "-N2", "--", "+RTS", "-N4", "-RTS"]);
+    assert_eq!(a.processors, Some(2));
+    assert_eq!(a.in_files, ["+RTS", "-N4", "-RTS"]);
+    let a = parse(&["--", "+RTS", "-N4", "-RTS"]);
+    assert_eq!(a.processors, None);
+    assert_eq!(a.in_files, ["+RTS", "-N4", "-RTS"]);
+    assert_eq!(parse(&["+RTS", "-RTS", "x.spthy"]).processors, None);
+}
+
+#[test]
+fn rts_rejects_invalid_counts_and_unsupported_options() {
+    for option in [
+        "-N0",
+        "-N-1",
+        "-N+2",
+        "-N=2",
+        "-Ntwo",
+        "-N1.5",
+        "-N999999999999999999999999",
+    ] {
+        assert_eq!(
+            parse_err(&["x.spthy", "+RTS", option]).kind(),
+            clap::error::ErrorKind::ValueValidation,
+            "{option}",
+        );
+    }
+    for option in ["-M1G", "-s", "--processors=2", "x.spthy"] {
+        let err = parse_err(&["+RTS", option, "-RTS", "x.spthy"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("unsupported RTS option"));
+    }
+    assert!(parse_args(&["-N2".into(), "x.spthy".into()]).is_err());
+}
+
+#[test]
 fn maude_processes_parsed() {
     let a = parse(&["--maude-processes", "3", "x.spthy"]);
     assert_eq!(a.maude_processes, Some(3));
@@ -710,7 +839,7 @@ fn help_and_version_are_clap() {
 }
 
 // =========================================================================
-// lemma_matches (HS lemmaSelector, TheoryLoader.hs:418-432)
+// lemma_matches (HS lemmaSelector, TheoryLoader.hs)
 // =========================================================================
 
 #[test]

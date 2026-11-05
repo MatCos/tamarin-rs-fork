@@ -1,10 +1,7 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
-
-//! JSON API for the TamRL reinforcement-learning client (feature `rl`).
+//! (No HS analog.) JSON API for the TamRL reinforcement-learning client
+//! (feature `rl`).
 //!
-//! (No HS analog upstream.)  A port of the endpoints the TamRL fork of the
+//! A port of the endpoints the TamRL fork of the
 //! Haskell server adds (`GET /` as JSON, `initialcs`, `executemethod`,
 //! `checkproof` in its `Web/Handler.hs`), served under `/api/v1` next to the
 //! GUI instead of replacing it:
@@ -29,13 +26,13 @@
 //!
 //! The API serves the theories loaded at startup, under the indices the GUI
 //! gave them, and keeps its own state per theory: one prover session, a
-//! pool of Maude processes, and per lemma a context with saturated sources
-//! plus the start system's response, each built on first use.  Every request
-//! runs on a blocking thread and does its proof work on a Maude process of
-//! its own, with a private fresh-variable counter, so parallel requests do
-//! not wait on each other (the fork's server runs them in parallel too).
-//! SAPIC theories are listed but their lemma routes answer 400: the codec
-//! does not carry the SAPIC process of a rule.
+//! pool of Maude processes, and per lemma a context and the start system's
+//! response, each built on first use.  Every request runs on a
+//! blocking thread and does its proof work on a Maude process of its own,
+//! with a private fresh-variable counter, so parallel requests do not wait
+//! on each other (the fork's server runs them in parallel too).  SAPIC
+//! theories are listed but their lemma routes answer 400: the codec does
+//! not carry the SAPIC process of a rule.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -50,9 +47,8 @@ use serde_json::{json, Map, Value};
 
 use tamarin_term::lterm::{LSort, LVar};
 use tamarin_term::maude_proc::{MaudeHandle, MaudePool, SharedMaudeCaches};
-use tamarin_term::pretty::pretty_lnterm_styled;
 use tamarin_theory::check_proof::{check_proof, MethodTree};
-use tamarin_theory::constraint::solver::context::{IntrRuleCache, ProofContext};
+use tamarin_theory::constraint::solver::context::{CutStrategy, ProofContext};
 use tamarin_theory::constraint::solver::contradictions::Contradiction;
 use tamarin_theory::constraint::solver::proof_method::{
     check_and_exec_proof_method, ProofMethod, Result as MethodResult,
@@ -61,15 +57,13 @@ use tamarin_theory::constraint::solver::search::{
     proof_size, proof_status, ranked_methods, NodeStatus, ProofNode, ProofStatus,
 };
 use tamarin_theory::constraint::system::System;
-use tamarin_theory::elaborate::{
-    collect_user_funs_for_theory, elaborate, set_user_funs_from_collected, CollectedUserFuns,
-};
-use tamarin_theory::pretty_ml::{goal_type_and_args, ML_TERM};
+use tamarin_theory::pretty_ml::goal_type_and_args;
 use tamarin_theory::pretty_theory::{pretty_proof_body, ProvedLemma};
-use tamarin_theory::prove::ProverSession;
+use tamarin_theory::prove::{ProveError, ProverSession, ProverSessionOptions};
 use tamarin_theory::system_codec::{
     decode_proof_method, decode_system, encode_proof_method, encode_system,
 };
+use tamarin_theory::theory::{Theory, TheoryItem};
 
 use crate::state::{AppState, TheoryEntry, TheoryStore};
 use crate::ServerConfig;
@@ -86,6 +80,7 @@ impl ApiState {
             theories: store
                 .list()
                 .into_iter()
+                .filter_map(|summary| store.get(summary.idx))
                 .map(|entry| {
                     let theory = ApiTheory {
                         entry,
@@ -107,15 +102,15 @@ struct ApiTheory {
 }
 
 struct Prover {
-    user_funs: CollectedUserFuns,
     session: ProverSession,
     pool: Arc<MaudePool>,
     lemmas: Mutex<BTreeMap<String, Arc<OnceLock<Result<Arc<LemmaState>, String>>>>>,
 }
 
 struct LemmaState {
-    /// The lemma's context (sources saturated); requests run on copies of
-    /// it that carry their own Maude process.
+    /// The lemma's context; requests run on copies of it that carry their
+    /// own Maude process.  Sources are saturated once per session, on the
+    /// first request that needs them.
     ctx: ProofContext,
     /// The `initial-system` response.
     initial: Value,
@@ -132,6 +127,10 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::BadRequest(msg.into())
+}
+
+fn internal(e: ProveError) -> ApiError {
+    ApiError::Internal(e.to_string())
 }
 
 impl IntoResponse for ApiError {
@@ -156,12 +155,12 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/theories", get(theories))
         .route(
-            "/theories/:idx/lemmas/:lemma/initial-system",
+            "/theories/{idx}/lemmas/{lemma}/initial-system",
             get(initial_system),
         )
-        .route("/theories/:idx/lemmas/:lemma/execute", post(execute))
+        .route("/theories/{idx}/lemmas/{lemma}/execute", post(execute))
         .route(
-            "/theories/:idx/lemmas/:lemma/check-proof",
+            "/theories/{idx}/lemmas/{lemma}/check-proof",
             post(check_proof_route),
         )
         .fallback(|| async { ApiError::NotFound })
@@ -171,7 +170,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn theories(State(state): State<Arc<AppState>>) -> Json<Value> {
     let mut out = Map::new();
     for (idx, theory) in &state.api.theories {
-        let name = &theory.entry.name;
+        let name = &theory.entry.typed_theory.name;
         out.insert(
             name.clone(),
             json!({"theoryIndex": idx, "theoryName": name, "theoryKind": "trace"}),
@@ -212,12 +211,14 @@ async fn execute(
         let lemma = prover.lemma(&lemma)?;
         prover.with_step_context(&lemma, |ctx| {
             let mut cases = check_and_exec_proof_method(ctx, &method, &sys)
+                .map_err(internal)?
                 .ok_or_else(|| bad("Proof method could not be applied to the given system"))?;
             cases.sort_by(|a, b| a.0.cmp(&b.0));
             let cases = cases
                 .iter()
-                .map(|(name, sys)| json!({"caseName": name, "system": system_json(ctx, sys)}))
-                .collect();
+                .map(|(name, sys)| Ok(json!({"caseName": name, "system": system_json(ctx, sys)?})))
+                .collect::<Result<_, ProveError>>()
+                .map_err(internal)?;
             Ok(Json(Value::Array(cases)))
         })
     })
@@ -240,11 +241,15 @@ async fn check_proof_route(
         let tree = method_tree(&proof).map_err(bad)?;
         let prover = theory.prover(&state.cfg)?;
         let lemma_state = prover.lemma(&lemma)?;
-        let start = prover
+        // `System` is not `Sync`, so the start system is rebuilt here rather
+        // than kept in the shared lemma state.
+        let (_, start) = prover
             .session
-            .lemma_initial_system(&lemma)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let checked = prover.with_step_context(&lemma_state, |ctx| check_proof(ctx, start, &tree));
+            .context_and_system_for_lemma(&lemma)
+            .map_err(internal)?;
+        let checked = prover
+            .with_step_context(&lemma_state, |ctx| check_proof(ctx, start, &tree))
+            .map_err(internal)?;
         Ok(Json(json!({
             "proofStatus": status_name(proof_status(&checked)),
             "proofSize": proof_size(&checked),
@@ -275,7 +280,7 @@ impl ApiState {
 
 impl ApiTheory {
     fn check_lemma(&self, lemma: &str) -> ApiResult<()> {
-        if self.entry.typed_theory.is_sapic {
+        if self.entry.typed_theory.is_sapic() {
             return Err(bad("SAPIC theories are not supported by this API"));
         }
         if self.entry.typed_theory.lookup_lemma(lemma).is_none() {
@@ -296,18 +301,31 @@ impl ApiTheory {
     }
 }
 
+/// The theory's cut strategy, as the GUI's `ProofState` picks it (HS
+/// `closeTheory` precedence): the CLI `--stop-on-trace` wins; the theory's
+/// `configuration:` block is consulted only when the flag is absent.
+fn effective_cut(theory: &Theory, cli_cut: Option<CutStrategy>) -> Result<CutStrategy, String> {
+    if let Some(cut) = cli_cut {
+        return Ok(cut);
+    }
+    let config_block = theory.items.iter().find_map(|i| match i {
+        TheoryItem::ConfigBlock(c) => Some(c),
+        _ => None,
+    });
+    Ok(match config_block {
+        Some(block) => tamarin_theory::prove::config_block_options(block)?
+            .0
+            .unwrap_or(CutStrategy::Dfs),
+        None => CutStrategy::Dfs,
+    })
+}
+
 impl Prover {
     /// The theory's prover session, set up as the GUI's (`ProofState::new`)
     /// but with a pool of Maude processes for the proof steps.
     fn build(entry: &TheoryEntry, cfg: &ServerConfig) -> Result<Prover, String> {
-        let user_funs = collect_user_funs_for_theory(&entry.parser_theory);
-        let _user_funs_guard = set_user_funs_from_collected(&user_funs);
-        let cut =
-            crate::handlers::proof_tree::effective_cut(&entry.parser_theory, cfg.stop_on_trace)?;
-        let typed =
-            elaborate(&entry.parser_theory).map_err(|e| format!("elaborate: {}", e.message))?;
-        tamarin_theory::prove::validate_cli_heuristic(&cfg.heuristic, &typed.tactic)?;
-        let sig = typed.signature.maude_sig;
+        let cut = effective_cut(&entry.typed_theory, cfg.stop_on_trace)?;
+        let sig = (*entry.prover_maude_sig).clone();
         // One memo set for the session's Maude and the pool's, as `--prove`
         // does; they all load the same signature.
         let caches = Arc::new(SharedMaudeCaches::default());
@@ -317,19 +335,22 @@ impl Prover {
             MaudePool::new(&cfg.maude_path, sig, cfg.maude_processes.max(1), caches)
                 .map_err(|e| format!("maude start: {e:?}"))?,
         );
-        let ndc_cache = entry.ndc_cache.clone().map(IntrRuleCache::from);
-        let session = ProverSession::build_with_in_file_and_heuristic(
-            &entry.parser_theory,
+        let session = ProverSession::build(
+            entry.typed_theory.clone(),
             maude,
-            Some(pool.clone()),
-            &entry.origin.label(),
-            cfg.heuristic.clone(),
-            cut,
-            ndc_cache.as_ref(),
+            ProverSessionOptions {
+                maude_pool: Some(pool.clone()),
+                cli_heuristic: cfg.heuristic.clone(),
+                cut,
+                ndc_cache: entry.ndc_cache.clone(),
+                parameters: cfg.solver_parameters,
+                show_saturation_steps: true,
+                loop_breakers_prepared: entry.ndc_cache.is_some(),
+                ..Default::default()
+            },
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("prover session: {e}"))?;
         Ok(Prover {
-            user_funs,
             session,
             pool,
             lemmas: Mutex::new(BTreeMap::new()),
@@ -346,16 +367,11 @@ impl Prover {
             .or_default()
             .clone();
         cell.get_or_init(|| {
-            let _user_funs_guard = set_user_funs_from_collected(&self.user_funs);
-            let ctx = self
+            let (ctx, start) = self
                 .session
-                .lemma_context(lemma)
+                .context_and_system_for_lemma(lemma)
                 .map_err(|e| e.to_string())?;
-            let start = self
-                .session
-                .lemma_initial_system(lemma)
-                .map_err(|e| e.to_string())?;
-            let initial = system_json(&ctx, &start);
+            let initial = system_json(&ctx, &start).map_err(|e| e.to_string())?;
             Ok(Arc::new(LemmaState { ctx, initial }))
         })
         .clone()
@@ -366,7 +382,6 @@ impl Prover {
     /// from the pool (waiting for a free one) and a fresh-variable counter
     /// of its own.
     fn with_step_context<R>(&self, lemma: &LemmaState, f: impl FnOnce(&ProofContext) -> R) -> R {
-        let _user_funs_guard = set_user_funs_from_collected(&self.user_funs);
         let maude = self.pool.acquire();
         let ctx = lemma
             .ctx
@@ -378,8 +393,8 @@ impl Prover {
 /// The fork's system object.  As in the fork, the methods are the ranking
 /// at depth 0 (`useHeuristic heuristic 0`), and a finished system's only
 /// method is `Finished`, which is where its status comes from.
-fn system_json(ctx: &ProofContext, sys: &System) -> Value {
-    let methods = ranked_methods(sys, ctx, 0);
+fn system_json(ctx: &ProofContext, sys: &System) -> Result<Value, ProveError> {
+    let methods = ranked_methods(sys, ctx, 0)?;
     let status = match methods.as_slice() {
         [ProofMethod::Finished(MethodResult::Contradictory(_))] => "Contradictory",
         [ProofMethod::Finished(MethodResult::Solved)] => "Solved",
@@ -387,12 +402,12 @@ fn system_json(ctx: &ProofContext, sys: &System) -> Value {
         // Sic: the fork's spelling, which clients compare against.
         _ => "Undertermined",
     };
-    json!({
+    Ok(json!({
         "proofMethods": methods.iter().map(|m| method_json(m, sys)).collect::<Vec<_>>(),
         "encodedMethods": methods.iter().map(encode_proof_method).collect::<Vec<_>>(),
         "encodedSys": encode_system(sys),
         "status": status,
-    })
+    }))
 }
 
 fn method_json(method: &ProofMethod, sys: &System) -> Value {
@@ -406,8 +421,6 @@ fn method_json(method: &ProofMethod, sys: &System) -> Value {
             json!({"name": "SolveGoal", "goal": {"type": kind, "args": args}})
         }
         ProofMethod::Finished(result) => json!({"name": "Finished", "result": result_json(result)}),
-        // Display-only; never ranked.
-        ProofMethod::RawSolve(_) => json!({"name": "RawSolve"}),
     }
 }
 
@@ -444,7 +457,7 @@ fn contradiction_json(c: &Contradiction) -> Value {
         }),
         Contradiction::SuperfluousLearn(t, v) => json!({
             "tag": "SuperfluousLearn",
-            "contents": [pretty_lnterm_styled(t, &ML_TERM), lvar_json(v)],
+            "contents": [tamarin_theory::pretty_ml::term(t), lvar_json(v)],
         }),
         Contradiction::NodeAfterLast(a, b) => json!({
             "tag": "NodeAfterLast",
@@ -516,7 +529,7 @@ fn method_tree(obj: &Map<String, Value>) -> std::result::Result<MethodTree, Stri
     Ok(MethodTree { method, cases })
 }
 
-/// HS `ProofStatus` constructor names (Theory/Proof.hs:397-407).
+/// HS `ProofStatus` constructor names (Theory/Proof.hs).
 fn status_name(status: ProofStatus) -> &'static str {
     match status {
         ProofStatus::Undetermined => "UndeterminedProof",
@@ -530,7 +543,7 @@ fn status_name(status: ProofStatus) -> &'static str {
 
 /// The theory with the checked proof for `lemma` and every other lemma's
 /// proof replaced by `sorry "removed"`, as the fork's `checkproof` renders
-/// it.
+/// it.  Rendered as the GUI's `source` route renders a theory.
 fn proof_file(entry: &TheoryEntry, lemma: &str, checked: &ProofNode) -> String {
     let removed = pretty_proof_body(&ProofNode {
         method: ProofMethod::Sorry(Some("removed".into())),
@@ -551,5 +564,24 @@ fn proof_file(entry: &TheoryEntry, lemma: &str, checked: &ProofNode) -> String {
             }),
         })
         .collect();
-    crate::handlers::theory::render_closed_theory(entry, &proved)
+    let build = tamarin_theory::pretty_theory::BuildInfo {
+        tamarin_version: env!("CARGO_PKG_VERSION").to_string(),
+        maude_version: String::new(),
+        git_revision: String::new(),
+        git_branch: String::new(),
+        compiled_at: String::new(),
+    };
+    let wf_block = tamarin_theory::pretty_theory::format_wf_block(&entry.wf_report);
+    let mut body = tamarin_theory::pretty_theory::pretty_closed_theory(
+        &entry.typed_theory,
+        &proved,
+        &wf_block,
+        &build,
+    );
+    // The `source` route serves the document without the trailing newline
+    // `pretty_closed_theory` adds for stdout.
+    if body.ends_with('\n') {
+        body.pop();
+    }
+    body
 }

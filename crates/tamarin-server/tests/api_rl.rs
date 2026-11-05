@@ -339,7 +339,7 @@ async fn a_failed_build_is_retried() {
         format!(
             "#!/bin/sh\n[ -e '{}' ] || exit 1\nexec '{}' \"$@\"\n",
             ready.display(),
-            common::maude_path()
+            tamarin_test_support::maude_path().expect("maude is available")
         ),
     )
     .unwrap();

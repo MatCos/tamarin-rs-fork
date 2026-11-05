@@ -1,97 +1,14 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
-//! Port of `Term.Subsumption` — subsumption ordering on terms.
-//!
-//! Subsumption: `t1 ≤ t2` iff there exists a substitution `s` such that
-//! `s(t1) =AC= t2`. We say `t1` subsumes `t2` when `t1` is the more
-//! general (i.e. has at most as much information as) of the two.
-//!
-//! The Haskell version uses Maude AC matching to decide subsumption.
-//! Likewise here: `compare_term_subs` / `eq_term_subs` decide
-//! subsumption by issuing two `maude.match_eqs` calls directly against
-//! a `&MaudeHandle`.
-
-use std::cmp::Ordering;
+//! Port of `canonizeSubst` from `Term.Subsumption` (Subsumption.hs):
+//! the canonical renaming of a fresh-range substitution's range variables.
 
 use crate::lterm::LNTerm;
-use crate::maude_proc::{MaudeError, MaudeHandle};
-use crate::rewriting::Equal;
-
-/// Compare two terms under the subsumption order modulo the
-/// configured equational theory. Returns `None` if the two are
-/// incomparable, or `Some(Ord)` otherwise.
-///
-/// Uses Maude's matcher. Port of HS `compareTermSubs`
-/// (`Subsumption.hs`):
-///
-/// ```haskell
-/// compareTermSubs t1 t2 = check <$> solveMatchLNTerm (t1 `matchWith` t2)
-///                               <*> solveMatchLNTerm (t2 `matchWith` t1)
-///   where check (_:_) []    = Just GT
-///         check []    (_:_) = Just LT
-///         check (_:_) (_:_) = Just EQ
-///         check []    []    = Nothing
-/// ```
-///
-/// `matchWith t p = DelayedMatches [(t, p)]` is `(subject, pattern)`
-/// (`Definitions.hs`). So arm A = `t1 matchWith t2` matches
-/// **subject t1** against **pattern t2** (∃σ. `t1 =AC σ(t2)`, i.e.
-/// `t2` subsumes `t1`); A non-empty + B empty ⇒ `GT`. Hence
-/// `Some(Greater)` means `t1` is strictly MORE SPECIFIC than `t2`.
-///
-/// **Convention trap.** `match_eqs` takes `Equal { lhs = subject,
-/// rhs = pattern }` (HS's `Equal subject pattern`, see its doc). So
-/// HS's `t1 matchWith t2` ⇒ `Equal { lhs: t1, rhs: t2 }` — keep
-/// `lhs = subject`, `rhs = pattern`. Flipping the two would swap
-/// `Greater`/`Less` (only `eq_term_subs` is invariant under the swap).
-///
-/// Intentionally retained: faithful HS port (`Subsumption.hs`);
-/// exercised by tests but with no production caller yet.
-#[allow(dead_code)]
-pub(crate) fn compare_term_subs(
-    maude: &MaudeHandle,
-    t1: &LNTerm,
-    t2: &LNTerm,
-) -> Result<Option<Ordering>, MaudeError> {
-    // arm A: `t1 matchWith t2` = subject t1, pattern t2.
-    let match_a = maude.match_eqs(&[Equal {
-        lhs: t1.clone(),
-        rhs: t2.clone(),
-    }])?;
-    // arm B: `t2 matchWith t1` = subject t2, pattern t1.
-    let match_b = maude.match_eqs(&[Equal {
-        lhs: t2.clone(),
-        rhs: t1.clone(),
-    }])?;
-    Ok(match (match_a.is_empty(), match_b.is_empty()) {
-        (true, true) => None,
-        (false, true) => Some(Ordering::Greater),
-        (true, false) => Some(Ordering::Less),
-        (false, false) => Some(Ordering::Equal),
-    })
-}
-
-/// Subsumption equality.
-///
-/// Intentionally retained: faithful HS port (`Subsumption.hs`); no
-/// caller yet.
-#[allow(dead_code)]
-pub(crate) fn eq_term_subs(
-    maude: &MaudeHandle,
-    t1: &LNTerm,
-    t2: &LNTerm,
-) -> Result<bool, MaudeError> {
-    Ok(matches!(
-        compare_term_subs(maude, t1, t2)?,
-        Some(Ordering::Equal)
-    ))
-}
 
 // =============================================================================
 // `canonizeSubst` — port of `Term.Subsumption.canonizeSubst`
-// (Subsumption.hs:67-76).
+// (Subsumption.hs).
 //
 // ```haskell
 // canonizeSubst :: LNSubstVFresh -> LNSubstVFresh
@@ -114,8 +31,9 @@ pub(crate) fn eq_term_subs(
 //     `BTreeMap` iteration order).  `varOccurences` returns, for each
 //     range var, the SET of context paths (`Occurence = [String]`) in
 //     which it appears.  The context path for a var is built innermost-
-//     first by `foldFreesOcc` (LTerm.hs:782-785 + the `[a]` instance
-//     LTerm.hs:840-845, see line 843): the outer `[VTerm]` list prepends `show listIdx`,
+//     first by `foldFreesOcc` (LTerm.hs + the `[a]` instance
+//     LTerm.hs): the outer `[VTerm]` list prepends
+//     `show listIdx`,
 //     a `FApp (NoEq o)` prepends `unpack (fst o)` (the symbol name),
 //     and a `FApp (AC|C) o` prepends `show o` (the Haskell `Show` of
 //     the whole `FunSym`, e.g. `"AC Mult"` / `"C EMap"`), then descends
@@ -152,7 +70,7 @@ use std::collections::BTreeSet;
 type Occurence = Vec<String>;
 
 /// HS `show` of a non-`NoEq` `FunSym` used as a context label
-/// (`foldFreesOcc f (show o:c) as` for AC/C symbols, LTerm.hs:782-786, see line 785).
+/// (`foldFreesOcc f (show o:c) as` for AC/C symbols, LTerm.hs).
 /// Mirrors the derived `Show` for `FunSym`/`ACSym`/`CSym`.
 fn show_funsym_ac_c(sym: &FunSym) -> String {
     match sym {
@@ -181,7 +99,7 @@ fn show_funsym_ac_c(sym: &FunSym) -> String {
 
 /// `foldFreesOcc (\c v -> [(v,c)]) c t` over a single term — collects
 /// `(var, context-path)` pairs.  Mirrors the `Term` instance
-/// (LTerm.hs:782-785):
+/// (LTerm.hs):
 ///
 /// ```haskell
 /// foldFreesOcc f c t = case viewTerm t of
@@ -192,7 +110,7 @@ fn show_funsym_ac_c(sym: &FunSym) -> String {
 ///
 /// **The NoEq vs AC/C asymmetry is load-bearing**: for a `NoEq` symbol the
 /// children `as :: [Term]` are folded via the `[a]` HasFrees instance
-/// (LTerm.hs:877-882, see line 880), which prepends each child's `show argIdx` to the
+/// (LTerm.hs), which prepends each child's `show argIdx` to the
 /// context.  But for an AC/C symbol HS does `mconcat $ map
 /// (foldFreesOcc f (show o:c)) as` — a DIRECT map over the children with
 /// the SAME `(show o : c)` context, bypassing the `[a]` instance, so the
@@ -229,7 +147,7 @@ fn fold_frees_occ_term(t: &LNTerm, ctx: &Occurence, out: &mut Vec<(LVar, Occuren
 /// `varOccurences (rangeVFresh subst)` — for each range var, the SET of
 /// context paths in which it occurs.  The argument is the list of range
 /// terms in domain-key order; the outer `[VTerm]` list instance
-/// prepends `show listIdx` to each term's context (LTerm.hs:877-882, see line 880).
+/// prepends `show listIdx` to each term's context (LTerm.hs).
 fn var_occurences(range_terms: &[LNTerm]) -> BTreeMap<LVar, BTreeSet<Occurence>> {
     let mut pairs: Vec<(LVar, Occurence)> = Vec::new();
     for (i, t) in range_terms.iter().enumerate() {
@@ -244,7 +162,7 @@ fn var_occurences(range_terms: &[LNTerm]) -> BTreeMap<LVar, BTreeSet<Occurence>>
 }
 
 /// `canonizeSubst` — canonical representative modulo renaming.
-/// Faithful port of HS `canonizeSubst` (Subsumption.hs:67-76).
+/// Faithful port of HS `canonizeSubst` (Subsumption.hs).
 pub fn canonize_subst(subst: &LNSubstVFresh) -> LNSubstVFresh {
     // `rangeVFresh subst = M.elems . svMap` — range terms in domain-key
     // (BTreeMap) order.
@@ -273,7 +191,7 @@ pub fn canonize_subst(subst: &LNSubstVFresh) -> LNSubstVFresh {
     }
 
     // `mapRangeVFresh (applyVTerm renaming) subst`.  `apply_vterm_map` is the
-    // `applyVTerm` HS canonizeSubst uses (Subsumption.hs:67-76): it dispatches
+    // `applyVTerm` HS canonizeSubst uses (Subsumption.hs): it dispatches
     // the `f_app_ac` / `f_app_c` / `f_app_no_eq` / `f_app_list` smart
     // constructors, so it **re-sorts AC/C operand lists** by the renamed `Ord
     // (Term a)`.  This matters: a renaming that reorders two operands of an AC

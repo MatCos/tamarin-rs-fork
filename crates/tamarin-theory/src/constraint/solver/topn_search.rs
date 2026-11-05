@@ -28,12 +28,6 @@
 //! kept across iterations, so no method runs twice. [`SearchOrder::Bfs`] is
 //! the same engine with the shallowest entry first.
 //!
-//! The limit applies to a path's cost, not its depth: each step costs one,
-//! plus `idx * alt_cost` for the heuristic's `idx`-th method
-//! ([`TopNConfig::alt_cost`], default 0, where the cost is the depth). A
-//! positive `alt_cost` lets the heuristic's first choices run deeper than
-//! alternatives within one iteration.
-//!
 //! ## Concurrency
 //!
 //! Each step takes a batch of up to B entries and runs in three phases:
@@ -62,10 +56,10 @@
 //! - `TAM_RS_TOP_METHODS=N`: search the first N applicable methods per system;
 //! - `TAM_RS_SEARCH_ORDER=iddfs|bfs`: the frontier order, default `iddfs`;
 //! - `TAM_RS_MERGE` (presence): merge canonically equal systems (needs `bliss`);
+//! - `TAM_RS_CANON_INVARIANT=off|on|check`: how merging canonicalizes
+//!   ([`super::canon_table`]), as in the MCGS search;
 //! - `TAM_RS_TOPN_BATCH=B`: entries expanded per step, default the rayon
 //!   thread count; pin it for reproducible runs;
-//! - `TAM_RS_TOPN_ALT_COST=W`: what an alternative method adds to a path's
-//!   cost against the depth limit, times its rank; default 0;
 //! - `TAM_RS_TOPN_STATS` (presence): one summary line per search on stderr,
 //!   and one per iteration.
 //! - `TAM_RS_SEARCH_STATS=SECS`: `[search-stats]` lines on stderr, the merge
@@ -81,14 +75,19 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use crate::canon_term_graph::system_to_term;
+use crate::constraint::solver::canon_table::{canon_mode_from_env, CanonicalTable};
 use crate::constraint::solver::context::ProofContext;
 use crate::constraint::solver::reduction::avoid_fresh_state;
 use crate::constraint::solver::search::{self, candidate_methods, ProofNode};
 use crate::constraint::solver::search_graph::{
-    self, apply_method, classify, Applied, Child, ClassId, End, Interned, Materializer,
-    MergeCounts, StatsReporter, Status, Stored, WorkStats, WorkerEnv, DEPTH_CAP, ROOT,
+    self, apply_method, classify, kept_system, Applied, Child, ClassId, End, Interned, KeptSystems,
+    Materializer, MergeCounts, StatsReporter, Status, Stored, WorkStats, WorkerEnv, DEPTH_CAP,
+    ROOT,
 };
 use crate::constraint::system::System;
+use crate::prove::ProveError;
+use tamarin_utils::FastMap;
 
 // =============================================================================
 // Configuration
@@ -114,12 +113,6 @@ pub struct TopNConfig {
     pub merge: bool,
     /// Frontier entries expanded concurrently per step.
     pub batch: usize,
-    /// What a method of heuristic rank `idx` adds to a path's cost beyond its
-    /// one level: `idx * alt_cost`. [`SearchOrder::IdDfs`]'s depth limit
-    /// applies to this cost, so with `alt_cost > 0` the heuristic's first
-    /// choices reach deeper than alternatives within one iteration; `0` makes
-    /// the cost the depth.
-    pub alt_cost: u32,
 }
 
 fn parse_positive(var: &str, value: &str) -> usize {
@@ -128,12 +121,6 @@ fn parse_positive(var: &str, value: &str) -> usize {
         .ok()
         .filter(|&n| n >= 1)
         .unwrap_or_else(|| panic!("{var}={value:?}: expected a positive integer"))
-}
-
-fn parse_u32(var: &str, value: &str) -> u32 {
-    value
-        .parse::<u32>()
-        .unwrap_or_else(|_| panic!("{var}={value:?}: expected a non-negative integer"))
 }
 
 /// The configuration from the environment, read once per process; `None`
@@ -159,17 +146,11 @@ pub fn top_n_from_env() -> Option<TopNConfig> {
             Ok(v) => parse_positive("TAM_RS_TOPN_BATCH", &v),
             Err(e) => panic!("TAM_RS_TOPN_BATCH: {e}"),
         };
-        let alt_cost = match std::env::var("TAM_RS_TOPN_ALT_COST") {
-            Err(std::env::VarError::NotPresent) => 0,
-            Ok(v) => parse_u32("TAM_RS_TOPN_ALT_COST", &v),
-            Err(e) => panic!("TAM_RS_TOPN_ALT_COST: {e}"),
-        };
         Some(TopNConfig {
             n,
             order,
             merge: tamarin_utils::env_gate!("TAM_RS_MERGE"),
             batch,
-            alt_cost,
         })
     })
 }
@@ -177,8 +158,7 @@ pub fn top_n_from_env() -> Option<TopNConfig> {
 /// [`top_n_from_env`] for one lemma of a theory, checked against what
 /// merging needs up front rather than at the first canonicalization.
 /// Theories with processes need nothing extra: the prover translates them
-/// before building the proof context, whose color table therefore covers
-/// the generated rules' actions.
+/// before building the proof context.
 pub fn config_for_lemma() -> Option<TopNConfig> {
     let config = top_n_from_env()?;
     if config.merge {
@@ -201,31 +181,24 @@ const FIRST_LIMIT: u32 = 4;
 /// What the top-N search keeps per class beyond the shared graph.
 #[derive(Debug, Default)]
 struct TopNExt {
-    /// The cheapest cost the class was reached at ([`TopNConfig::alt_cost`]);
-    /// tracked apart from `min_depth`, which may come from another path.
-    min_cost: u32,
-    /// The class's one live frontier entry: `None` while it is being expanded
-    /// or has no entry. Any other entry of the class is stale.
-    pending: Option<Pending>,
+    /// `(depth, rank)` of the class's one live frontier entry: `None` while
+    /// it is being expanded or has no entry. Any other entry is stale.
+    pending: Option<(u32, u32)>,
+}
+
+impl search_graph::DumpExt for TopNExt {
+    fn and_fields(&self, a: usize, row: &mut serde_json::Map<String, serde_json::Value>) {
+        // Methods are applied in the heuristic's order, the first that apply,
+        // so the method's index is its rank among the applicable ones.
+        row.insert("rank".into(), serde_json::json!(a));
+    }
 }
 
 type SearchGraph = search_graph::SearchGraph<TopNExt>;
 
 impl SearchGraph {
-    /// The class's [`Pending`] if `e`, popped from the frontier, is its live
-    /// entry; `None` for a stale one.
-    fn live(&self, e: &Entry) -> Option<Pending> {
-        let pending = self
-            .class(e.class.0)
-            .ext
-            .pending
-            .filter(|p| p.entry == *e)?;
-        assert!(
-            !pending.parked,
-            "top-N search: a live entry is in the frontier and parked at once (class #{})",
-            e.class.0
-        );
-        Some(pending)
+    fn entry_is_live(&self, e: &Entry) -> bool {
+        self.class(e.class.0).ext.pending == Some((e.depth, e.rank))
     }
 }
 
@@ -233,10 +206,8 @@ impl SearchGraph {
 // The frontier
 // =============================================================================
 
-/// "Apply the next method of `class`". Its fields are exactly the frontier
-/// order, compared top to bottom by the derived `Ord` of a max-heap. The
-/// cost, which decides only whether the entry runs in this iteration, is in
-/// the class's [`Pending`].
+/// "Apply the next method of `class`", ordered for a max-heap. The derived
+/// order compares the fields top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Entry {
     /// `depth` for ([`SearchOrder::IdDfs`]) or `u32::MAX - depth`
@@ -247,6 +218,8 @@ struct Entry {
     /// The oldest class first among equals. Cases of a class are sorted
     /// lexicographically and given ascending ClassIds.
     class: Reverse<ClassId>,
+    /// Follows from `primary`, so it never decides the order.
+    depth: u32,
 }
 
 impl Entry {
@@ -259,21 +232,9 @@ impl Entry {
             primary,
             rank,
             class: Reverse(class),
+            depth,
         }
     }
-}
-
-/// A class's live entry, with what the order leaves out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Pending {
-    entry: Entry,
-    depth: u32,
-    /// The class's cheapest cost plus `idx * alt_cost`: the entry runs in the
-    /// first iteration whose limit exceeds it.
-    cost: u32,
-    /// Whether the entry waits in [`Engine::parked`] rather than in the
-    /// frontier.
-    parked: bool,
 }
 
 // =============================================================================
@@ -294,6 +255,8 @@ enum Outcome {
     Terminal,
     /// The deadline passed; the result is discarded.
     Aborted,
+    /// Ranking or applying a method failed; the search fails with it.
+    Failed(ProveError),
 }
 
 struct Expansion {
@@ -304,7 +267,9 @@ struct Expansion {
 }
 
 /// Applies the class's next applicable method and prepares its cases.
-fn expand_task(ctx: &ProofContext, task: Task, merge: bool) -> Expansion {
+/// With merging, `table` is the search's canonical table, which the cases
+/// are prepared for.
+fn expand_task(ctx: &ProofContext, task: Task, table: Option<&CanonicalTable>) -> Expansion {
     let start = Instant::now();
     let Task {
         class,
@@ -315,7 +280,17 @@ fn expand_task(ctx: &ProofContext, task: Task, merge: bool) -> Expansion {
     let mut work = WorkStats::default();
     let stop = search::deadline_reached;
     if stored.ranked.is_none() {
-        stored.ranked = Some(candidate_methods(&stored.sys, ctx, depth as usize));
+        match candidate_methods(&stored.sys, ctx, depth as usize) {
+            Ok(ranked) => stored.ranked = Some(ranked),
+            Err(e) => {
+                return Expansion {
+                    class,
+                    stored,
+                    outcome: Outcome::Failed(e),
+                    work,
+                };
+            }
+        }
     }
     let outcome = loop {
         if stop() {
@@ -325,8 +300,19 @@ fn expand_task(ctx: &ProofContext, task: Task, merge: bool) -> Expansion {
         let Some(method) = ranked.get(stored.cursor).cloned() else {
             break Outcome::Terminal;
         };
-        let Some(applied) = apply_method(ctx, &stored, &method, cut_children, merge, &mut work)
-        else {
+        let applied = match apply_method(
+            ctx,
+            &stored,
+            &method,
+            cut_children,
+            table,
+            table.is_some(),
+            &mut work,
+        ) {
+            Ok(applied) => applied,
+            Err(e) => break Outcome::Failed(e),
+        };
+        let Some(applied) = applied else {
             if stop() {
                 break Outcome::Aborted;
             }
@@ -378,14 +364,17 @@ struct Engine<'a> {
     graph: SearchGraph,
     /// Indexed by class; see [`Stored`].
     store: Vec<Option<Stored>>,
+    /// The systems of pending classes of the canonical table that the store
+    /// dropped: the table needs them to canonicalize a representative.
+    retained: FastMap<ClassId, Box<System>>,
     frontier: BinaryHeap<Entry>,
-    /// Classes whose live entry waits for a higher limit
-    /// ([`Pending::parked`]). A class may appear twice; it gets its entry
-    /// back once.
-    parked: Vec<ClassId>,
+    /// Live entries at or beyond the depth limit, for the next iteration.
+    parked: Vec<Entry>,
     /// `--bound`: no class at this depth or deeper is expanded.
     bound: u32,
     deadline: Instant,
+    /// With merging: the classes' canonical keys.
+    table: CanonicalTable,
     stats: Stats,
     reporter: StatsReporter,
 }
@@ -397,80 +386,65 @@ impl<'a> Engine<'a> {
             config,
             graph: SearchGraph::new(),
             store: Vec::new(),
+            retained: FastMap::default(),
             frontier: BinaryHeap::new(),
             parked: Vec::new(),
             bound,
             deadline,
+            table: CanonicalTable::new(canon_mode_from_env()),
             stats: Stats::default(),
             reporter: StatsReporter::new("topn"),
         }
     }
 
     fn merge_counts(&self) -> MergeCounts {
+        let (stored, stored_unkeyed) =
+            search_graph::stored_counts(&self.graph, &self.store, self.config.merge);
         MergeCounts {
             applied: self.stats.applied,
             leaves: self.stats.leaves,
             merges: self.stats.merges,
+            // Every merge happens when a case is created; whether a later
+            // step goes through it is not tracked here.
+            merges_used: self.stats.merges,
+            stored,
+            stored_unkeyed,
+            retained: self.retained.len() as u64,
+            ..MergeCounts::default()
         }
+        .with_table(&self.table)
     }
 
     /// A `[search-stats]` progress line, if one is due.
     fn report_progress(&mut self) {
         let counts = self.merge_counts();
-        self.reporter
-            .tick(&self.ctx.lemma_name, &self.graph, &counts, &self.stats.work);
+        self.reporter.tick(
+            &self.ctx.lemma_name,
+            &self.graph,
+            &self.table,
+            &counts,
+            &self.stats.work,
+        );
     }
 
     #[cfg(test)]
-    fn add_class(
-        &mut self,
-        status: Status,
-        depth: u32,
-        cost: u32,
-        stored: Option<Stored>,
-    ) -> ClassId {
+    fn add_class(&mut self, status: Status, depth: u32, stored: Option<Stored>) -> ClassId {
         let id = self.graph.add_class(status, depth);
-        self.adopt(id, cost, stored);
+        self.adopt(id, stored);
         id
     }
 
-    /// Gives the new class `c` its cost and its slot in the store.
-    fn adopt(&mut self, c: ClassId, cost: u32, stored: Option<Stored>) {
+    /// Gives the new class `c` its slot in the store.
+    fn adopt(&mut self, c: ClassId, stored: Option<Stored>) {
         assert_eq!(self.store.len(), c as usize, "classes are adopted in order");
-        self.graph.class_mut(c).ext.min_cost = cost;
         self.store.push(stored);
     }
 
-    /// `idx * alt_cost`: what applying the heuristic's `idx`-th method adds.
-    fn alt_cost(&self, idx: u32) -> u32 {
-        idx.saturating_mul(self.config.alt_cost)
-    }
-
-    /// Makes "apply `c`'s method of rank `rank`" the class's live entry, at
-    /// its current depth and cost. The frontier gets the entry unless it
-    /// already holds this one: then only the cost changed, which is not part
-    /// of the order.
     fn push_entry(&mut self, c: ClassId, rank: u32) {
-        let class = self.graph.class(c);
-        let depth = class.min_depth;
-        let cost = class
-            .ext
-            .min_cost
-            .saturating_add(self.alt_cost(self.config.n - rank));
-        let entry = Entry::new(self.config.order, depth, rank, c);
-        let queued = class
-            .ext
-            .pending
-            .is_some_and(|p| p.entry == entry && !p.parked);
-        self.graph.class_mut(c).ext.pending = Some(Pending {
-            entry,
-            depth,
-            cost,
-            parked: false,
-        });
-        if !queued {
-            self.frontier.push(entry);
-        }
+        let depth = self.graph.class(c).min_depth;
+        self.graph.class_mut(c).ext.pending = Some((depth, rank));
+        self.frontier
+            .push(Entry::new(self.config.order, depth, rank, c));
     }
 
     /// `N - idx` of `c`'s next method.
@@ -483,61 +457,58 @@ impl<'a> Engine<'a> {
         let child = if self.bound == 0 {
             Child::Cut
         } else {
-            classify(self.ctx, sys, self.config.merge, &mut work)
+            classify(
+                self.ctx,
+                sys,
+                self.config.merge.then_some(&self.table),
+                &mut work,
+            )
         };
-        self.stats.work.canons += work.canons;
-        self.stats.work.canon_time += work.canon_time;
-        let root = self.intern(child, 0, 0);
+        self.stats.work.add(&work);
+        let root = self.intern(child, 0);
         assert_eq!(root, ROOT, "the root is the first class");
     }
 
-    /// The class of a prepared case reached at `depth` and `cost`: a new one,
-    /// or with merging an existing one reached again.
-    fn intern(&mut self, child: Child, depth: u32, cost: u32) -> ClassId {
-        let (c, interned) = self.graph.intern(child, depth);
+    /// The class of a prepared case reached at `depth`: a new one, or with
+    /// merging an existing one reached again.
+    fn intern(&mut self, child: Child, depth: u32) -> ClassId {
+        let (c, interned) = self
+            .graph
+            .intern(child, depth, &mut self.table, &mut self.stats.work);
         match interned {
-            Interned::Cut => self.adopt(c, cost, None),
+            Interned::Cut => self.adopt(c, None),
             Interned::Leaf => {
                 self.stats.leaves += 1;
-                self.adopt(c, cost, None);
+                self.adopt(c, None);
             }
             Interned::New(stored) => {
-                self.adopt(c, cost, Some(stored));
+                self.adopt(c, Some(stored));
                 self.push_entry(c, self.config.n);
             }
             Interned::Merged => {
                 self.stats.merges += 1;
-                self.lower(c, depth, cost);
+                self.lower_depth(c, depth);
                 self.requeue_if_dormant(c);
             }
         }
         c
     }
 
-    /// Records that `c` was reached at `depth` and `cost`, and its descendants
-    /// correspondingly: each minimum is lowered on its own. A live entry
-    /// moves to the new values: a shallower one replaces it in the frontier,
-    /// leaving the old one stale; a cheaper one keeps its place, or comes
-    /// back from the parked ones, whose limit it may now be under.
-    fn lower(&mut self, c: ClassId, depth: u32, cost: u32) {
-        let mut work = vec![(c, depth, cost)];
-        while let Some((c, depth, cost)) = work.pop() {
-            let class = self.graph.class(c);
-            if depth >= class.min_depth && cost >= class.ext.min_cost {
+    /// Records that `c` was reached at `depth`, and its descendants
+    /// correspondingly shallower. A live entry moves to the new depth; the
+    /// old one goes stale.
+    fn lower_depth(&mut self, c: ClassId, depth: u32) {
+        let mut work = vec![(c, depth)];
+        while let Some((c, depth)) = work.pop() {
+            if depth >= self.graph.class(c).min_depth {
                 continue;
             }
-            let (depth, cost) = (depth.min(class.min_depth), cost.min(class.ext.min_cost));
-            let class = self.graph.class_mut(c);
-            class.min_depth = depth;
-            class.ext.min_cost = cost;
-            if let Some(pending) = class.ext.pending {
-                self.push_entry(c, pending.entry.rank);
+            self.graph.class_mut(c).min_depth = depth;
+            if let Some((_, rank)) = self.graph.class(c).ext.pending {
+                self.push_entry(c, rank);
             }
-            for (a, and) in self.graph.class(c).ands.iter().enumerate() {
-                let step = cost
-                    .saturating_add(self.alt_cost(a as u32))
-                    .saturating_add(1);
-                work.extend(and.cases.iter().map(|&(_, child)| (child, depth + 1, step)));
+            for and in &self.graph.class(c).ands {
+                work.extend(and.cases.iter().map(|&(_, child)| (child, depth + 1)));
             }
         }
     }
@@ -555,27 +526,6 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Moves the parked entries back into the frontier for the next
-    /// iteration. A class listed twice gets its entry back once, and one whose
-    /// entry was replaced meanwhile ([`Self::push_entry`]) gets none.
-    fn unpark(&mut self) {
-        for c in std::mem::take(&mut self.parked) {
-            let Some(pending) = self
-                .graph
-                .class_mut(c)
-                .ext
-                .pending
-                .as_mut()
-                .filter(|p| p.parked)
-            else {
-                continue;
-            };
-            pending.parked = false;
-            let entry = pending.entry;
-            self.frontier.push(entry);
-        }
-    }
-
     /// Phase 1: pops up to B live, relevant entries below `limit`.
     fn select_batch(&mut self, limit: u32) -> Vec<Task> {
         let mut tasks = Vec::new();
@@ -583,13 +533,15 @@ impl<'a> Engine<'a> {
             let Some(e) = self.frontier.pop() else {
                 break;
             };
-            let Some(pending) = self.graph.live(&e) else {
+            if !self.graph.entry_is_live(&e) {
                 continue;
-            };
+            }
             let c = e.class.0;
             if self.graph.class(c).status != Status::Open {
                 self.graph.class_mut(c).ext.pending = None;
-                self.store[c as usize] = None;
+                if let Some(stored) = self.store[c as usize].take() {
+                    self.set_aside(c, stored);
+                }
                 continue;
             }
             if !self.graph.is_relevant(c) {
@@ -598,14 +550,8 @@ impl<'a> Engine<'a> {
                 self.graph.class_mut(c).ext.pending = None;
                 continue;
             }
-            // Nothing is parked at the largest limit: a saturated cost must
-            // not keep an entry parked forever.
-            if pending.cost >= limit && limit < u32::MAX {
-                self.graph.class_mut(c).ext.pending = Some(Pending {
-                    parked: true,
-                    ..pending
-                });
-                self.parked.push(c);
+            if e.depth >= limit {
+                self.parked.push(e);
                 continue;
             }
             self.graph.class_mut(c).ext.pending = None;
@@ -614,8 +560,8 @@ impl<'a> Engine<'a> {
                 .expect("a class with a live entry keeps its system");
             tasks.push(Task {
                 class: c,
-                depth: pending.depth,
-                cut_children: pending.depth + 1 >= self.bound,
+                depth: e.depth,
+                cut_children: e.depth + 1 >= self.bound,
                 stored,
             });
         }
@@ -629,11 +575,12 @@ impl<'a> Engine<'a> {
         let count = tasks.len();
         let results = {
             let ctx = self.ctx;
-            let merge = self.config.merge;
+            // Workers read the table while this thread waits for them.
+            let table = self.config.merge.then_some(&self.table);
             let expand = |task: Task| -> Expansion {
                 let avoid_next = avoid_fresh_state(&task.stored.sys);
                 env.run(ctx, avoid_next, |worker_ctx| {
-                    expand_task(worker_ctx, task, merge)
+                    expand_task(worker_ctx, task, table)
                 })
             };
             if count == 1 {
@@ -648,8 +595,26 @@ impl<'a> Engine<'a> {
         results
     }
 
+    /// `stored`, the system of `c`, which the search is done with: set aside
+    /// if `c` is a pending class of the canonical table, which needs it to
+    /// canonicalize the class's representative when a system with its
+    /// invariant comes; dropped otherwise.
+    fn set_aside(&mut self, c: ClassId, stored: Stored) {
+        if self.table.is_pending(c) {
+            self.retained.insert(c, stored.sys);
+        }
+    }
+
+    /// Drops the set-aside systems of the classes the canonical table keyed
+    /// since: it needs them no more.
+    fn forget_keyed(&mut self) {
+        for c in self.table.take_keyed() {
+            self.retained.remove(&c);
+        }
+    }
+
     /// Phase 3: adds one expansion to the graph.
-    fn integrate(&mut self, expansion: Expansion) {
+    fn integrate(&mut self, expansion: Expansion) -> Result<(), ProveError> {
         let Expansion {
             class: c,
             stored,
@@ -658,29 +623,27 @@ impl<'a> Engine<'a> {
         } = expansion;
         self.stats.work.add(&work);
         match outcome {
+            Outcome::Failed(e) => return Err(e),
             Outcome::Aborted => {
                 // The search stops after this batch; keep the system anyway
                 // so the graph stays consistent.
                 self.stats.aborted += 1;
                 self.store[c as usize] = Some(stored);
             }
-            Outcome::Terminal => self.graph.close(c),
+            Outcome::Terminal => {
+                self.graph.close(c);
+                self.set_aside(c, stored);
+            }
             Outcome::Applied(Applied {
                 method,
-                method_fp,
+                method_key,
                 cases,
             }) => {
                 self.stats.applied += 1;
-                let a = self.graph.add_and(c, method, method_fp);
-                let class = self.graph.class(c);
-                let depth = class.min_depth + 1;
-                let cost = class
-                    .ext
-                    .min_cost
-                    .saturating_add(self.alt_cost(u32::from(a)))
-                    .saturating_add(1);
+                let a = self.graph.add_and(c, method, method_key);
+                let depth = self.graph.class(c).min_depth + 1;
                 for (name, child) in cases {
-                    let child = self.intern(child, depth, cost);
+                    let child = self.intern(child, depth);
                     self.graph.add_case(c, a, name, child);
                 }
                 let applied = self.graph.class(c).ands.len() as u32;
@@ -690,6 +653,7 @@ impl<'a> Engine<'a> {
                     self.push_entry(c, self.next_rank(c));
                 } else {
                     self.graph.class_mut(c).closed = true;
+                    self.set_aside(c, stored);
                 }
                 self.graph.propagate(vec![(c, a)]);
                 // `closed` may also settle `c` without any method changing.
@@ -697,6 +661,7 @@ impl<'a> Engine<'a> {
                 self.graph.propagate(parents);
             }
         }
+        Ok(())
     }
 
     fn end(&self) -> Option<End> {
@@ -741,7 +706,9 @@ impl<'a> Engine<'a> {
         );
     }
 
-    fn search(&mut self, env: &WorkerEnv) -> End {
+    /// Fails with the first error in batch order, so which error a search
+    /// reports does not depend on which worker met one first.
+    fn search(&mut self, env: &WorkerEnv) -> Result<End, ProveError> {
         let mut limit = match self.config.order {
             SearchOrder::IdDfs => FIRST_LIMIT.min(self.bound),
             SearchOrder::Bfs => self.bound,
@@ -752,30 +719,50 @@ impl<'a> Engine<'a> {
             loop {
                 if let Some(end) = self.end() {
                     self.report_iteration(limit, &start);
-                    return end;
+                    return Ok(end);
                 }
                 let tasks = self.select_batch(limit);
                 if tasks.is_empty() {
                     break;
                 }
-                let results = self.expand_batch(env, tasks);
-                for result in results {
-                    self.integrate(result);
+                let mut results = self.expand_batch(env, tasks);
+                // What no worker could key, before any case is placed. A
+                // representative may be a class this batch expanded, whose
+                // system is in its expansion until integrated.
+                let mut expanded: FastMap<ClassId, &System> = FastMap::default();
+                let mut items = Vec::new();
+                for expansion in &mut results {
+                    expanded.insert(expansion.class, &expansion.stored.sys);
+                    if let Outcome::Applied(applied) = &mut expansion.outcome {
+                        items.extend(Child::prepared_mut(&mut applied.cases));
+                    }
                 }
+                self.table.precompute(
+                    items,
+                    |r| {
+                        kept_system(&self.store, &self.retained, r)
+                            .or_else(|| expanded.get(&r).copied())
+                            .map(system_to_term)
+                    },
+                    &mut self.stats.work,
+                );
+                for result in results {
+                    self.integrate(result)?;
+                }
+                self.forget_keyed();
                 self.report_progress();
             }
             self.report_iteration(limit, &start);
             if let Some(end) = self.end() {
-                return end;
+                return Ok(end);
             }
             if self.parked.is_empty() {
-                return End::Exhausted;
+                return Ok(End::Exhausted);
             }
-            // The limit applies to the cost and `bound` to the depth: with
-            // `alt_cost`, an entry at a depth below `bound` can cost more than
-            // `bound`, so the limit keeps doubling past it.
-            limit = limit.saturating_mul(2);
-            self.unpark();
+            // Parked entries lie below `bound`, so `limit < bound` here.
+            limit = limit.saturating_mul(2).min(self.bound);
+            let parked = std::mem::take(&mut self.parked);
+            self.frontier.extend(parked);
         }
     }
 }
@@ -793,18 +780,19 @@ pub fn run(
     proof_bound: usize,
     config: TopNConfig,
     deadline: Instant,
-) -> ProofNode {
+) -> Result<ProofNode, ProveError> {
     let start = Instant::now();
     let bound = u32::try_from(proof_bound)
         .unwrap_or(u32::MAX)
         .min(DEPTH_CAP);
     let mut engine = Engine::new(ctx, config, bound, deadline);
     engine.add_root(initial.clone());
-    let end = engine.search(&WorkerEnv::capture(Some(deadline)));
+    let end = engine.search(&WorkerEnv::capture(Some(deadline)))?;
     let searched = start.elapsed();
     engine.reporter.finish(
         &ctx.lemma_name,
         &engine.graph,
+        &engine.table,
         &engine.merge_counts(),
         &engine.stats.work,
         end,
@@ -812,24 +800,33 @@ pub fn run(
 
     // Materializing runs methods again; the deadline the search may have hit
     // must not cut that short.
-    let previous_deadline = search::replace_deadline(None);
+    let no_deadline = search::capture_search_tls(None);
     let materialize_start = Instant::now();
+    let kept = KeptSystems::new(
+        std::mem::take(&mut engine.store),
+        std::mem::take(&mut engine.retained),
+    );
     let materializer = Materializer {
         graph: &engine.graph,
+        table: &engine.table,
+        kept: &kept,
         merge: config.merge,
         bound,
         end,
         env: WorkerEnv::capture(None),
         label: "top-N",
     };
-    let root = materializer.root(ctx, initial);
+    let root = {
+        let _tls = search::SearchTlsGuard::install(no_deadline);
+        materializer.root(ctx, initial)?
+    };
     let materialized = materialize_start.elapsed();
-    search::replace_deadline(previous_deadline);
+    (engine.store, engine.retained) = kept.into_inner();
 
     if tamarin_utils::env_gate!("TAM_RS_TOPN_STATS") {
         print_stats(ctx, &config, &engine, end, &root, searched, materialized);
     }
-    root
+    Ok(root)
 }
 
 fn print_stats(
@@ -858,7 +855,7 @@ fn print_stats(
         .filter(|c| c.parents.len() > 1)
         .count();
     eprintln!(
-        "[topn] lemma={} n={} order={:?} merge={} batch={} alt_cost={} end={:?} root={:?} \
+        "[topn] lemma={} n={} order={:?} merge={} batch={} end={:?} root={:?} \
          classes={} leaves={} merges={} shared={} execs={} applied={} canons={} canon_s={:.3} \
          iterations={} batches={} tasks={} aborted={} efficiency={:.2} \
          search_s={:.3} materialize_s={:.3}",
@@ -867,7 +864,6 @@ fn print_stats(
         config.order,
         config.merge,
         config.batch,
-        config.alt_cost,
         end,
         root.status,
         engine.graph.classes.len(),
@@ -928,91 +924,44 @@ mod tests {
         let c = g.add_class(Status::Open, 0);
         let old = Entry::new(SearchOrder::IdDfs, 5, 3, c);
         let new = Entry::new(SearchOrder::IdDfs, 2, 3, c);
-        g.class_mut(c).ext.pending = Some(Pending {
-            entry: new,
-            depth: 2,
-            cost: 2,
-            parked: false,
-        });
-        assert!(g.live(&old).is_none());
-        assert!(g.live(&new).is_some());
+        g.class_mut(c).ext.pending = Some((2, 3));
+        assert!(!g.entry_is_live(&old));
+        assert!(g.entry_is_live(&new));
         g.class_mut(c).ext.pending = None;
-        assert!(g.live(&new).is_none());
+        assert!(!g.entry_is_live(&new));
     }
 
     // --- The frontier's bookkeeping (maude only for the context) -----------
 
-    /// An engine over hand-made classes: the first one is the root, so it is
-    /// always relevant.
-    fn engine(ctx: &ProofContext, alt_cost: u32) -> Engine<'_> {
-        let config = TopNConfig {
-            alt_cost,
-            ..config(2, false, 1)
-        };
-        Engine::new(
-            ctx,
-            config,
-            DEPTH_CAP,
-            Instant::now() + Duration::from_secs(3600),
-        )
-    }
-
-    fn with_system() -> Option<Stored> {
-        Some(Stored::new(System::empty(), None))
-    }
-
+    /// A class parked at the depth limit that a merge reaches shallower runs
+    /// within the iteration; the parked entry goes stale.
     #[test]
-    fn a_cheaper_path_changes_the_cost_but_not_the_frontier() {
+    fn a_shallower_path_brings_a_parked_class_back_within_the_iteration() {
         let Some(ctx) = ctx() else {
             return;
         };
-        let mut engine = engine(&ctx, 4);
-        let c = engine.add_class(Status::Open, 0, 5, None);
-        engine.push_entry(c, 2);
-        engine.lower(c, 0, 1);
-        assert_eq!(engine.frontier.len(), 1, "the key did not change");
-        assert_eq!(engine.graph.class(c).ext.pending.map(|p| p.cost), Some(1));
-    }
-
-    #[test]
-    fn a_cheaper_path_brings_a_parked_entry_back_within_the_iteration() {
-        let Some(ctx) = ctx() else {
-            return;
-        };
-        let mut engine = engine(&ctx, 4);
-        let c = engine.add_class(Status::Open, 0, 5, with_system());
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let mut engine = Engine::new(&ctx, config(2, false, 1), DEPTH_CAP, deadline);
+        // The first class is the root, so it is always relevant.
+        let c = engine.add_class(Status::Open, 5, Some(Stored::new(System::empty(), None)));
         engine.push_entry(c, 2);
         assert!(
             engine.select_batch(4).is_empty(),
-            "cost 5 waits for a higher limit"
+            "depth 5 waits for a higher limit"
         );
-        assert_eq!(engine.parked, vec![c]);
-        engine.lower(c, 0, 2);
+        assert_eq!(engine.parked.len(), 1);
+        engine.lower_depth(c, 2);
         let tasks = engine.select_batch(4);
-        assert_eq!(tasks.iter().map(|t| t.class).collect::<Vec<_>>(), vec![c]);
-        engine.unpark();
-        assert!(
-            engine.frontier.is_empty(),
-            "the expanded entry is not parked any more"
+        assert_eq!(
+            tasks.iter().map(|t| (t.class, t.depth)).collect::<Vec<_>>(),
+            vec![(c, 2)]
         );
-    }
-
-    #[test]
-    fn a_class_parked_twice_gets_its_entry_back_once() {
-        let Some(ctx) = ctx() else {
-            return;
-        };
-        let mut engine = engine(&ctx, 4);
-        let c = engine.add_class(Status::Open, 0, 6, with_system());
-        engine.push_entry(c, 2);
-        assert!(engine.select_batch(4).is_empty());
-        engine.lower(c, 0, 5);
-        assert!(engine.select_batch(4).is_empty(), "still above the limit");
-        assert_eq!(engine.parked, vec![c, c]);
-        engine.unpark();
-        assert_eq!(engine.frontier.len(), 1);
-        assert_eq!(engine.select_batch(8).len(), 1);
-        assert!(engine.frontier.is_empty());
+        let parked = std::mem::take(&mut engine.parked);
+        engine.frontier.extend(parked);
+        assert!(
+            engine.select_batch(8).is_empty(),
+            "the parked entry is stale"
+        );
     }
 
     // --- Against the greedy driver (maude) -------------------------------
@@ -1029,7 +978,6 @@ mod tests {
             order: SearchOrder::IdDfs,
             merge,
             batch,
-            alt_cost: 0,
         }
     }
 
@@ -1040,7 +988,7 @@ mod tests {
         let Some(mut ctx) = ctx() else {
             return;
         };
-        let greedy = run_proof_search(&ctx, make(), bound);
+        let greedy = run_proof_search(&ctx, make(), bound).expect("proof search");
         let expected = pretty_proof_body(&greedy);
         let merges: &[bool] = if merge_too && crate::bliss_proc::bliss_available() {
             &[false, true]
@@ -1049,22 +997,16 @@ mod tests {
         };
         for &merge in merges {
             for batch in [1, 4] {
-                for alt_cost in [0, 8] {
-                    // One method per system leaves no alternative to weight.
-                    ctx.top_n = Some(TopNConfig {
-                        alt_cost,
-                        ..config(1, merge, batch)
-                    });
-                    let top1 = run_proof_search(&ctx, make(), bound);
-                    assert_eq!(
-                        pretty_proof_body(&top1),
-                        expected,
-                        "n=1 merge={merge} batch={batch} alt_cost={alt_cost}"
-                    );
-                    assert_eq!(top1.status, greedy.status);
-                }
+                ctx.top_n = Some(config(1, merge, batch));
+                let top1 = run_proof_search(&ctx, make(), bound).expect("proof search");
+                assert_eq!(
+                    pretty_proof_body(&top1),
+                    expected,
+                    "n=1 merge={merge} batch={batch}"
+                );
+                assert_eq!(top1.status, greedy.status);
                 ctx.top_n = Some(config(3, merge, batch));
-                let top3 = run_proof_search(&ctx, make(), bound);
+                let top3 = run_proof_search(&ctx, make(), bound).expect("proof search");
                 if matches!(
                     greedy.status,
                     NodeStatus::Solved | NodeStatus::Contradictory
@@ -1099,26 +1041,18 @@ mod tests {
     }
 
     /// With `--bound 1` the greedy search's `simplify` ends in `sorry`; the
-    /// second-ranked method closes the system within the bound, also when its
-    /// cost exceeds the bound: the bound cuts by depth, not by cost.
+    /// second-ranked method closes the system within the bound.
     #[test]
     fn a_lower_ranked_method_closes_what_the_first_leaves_open() {
         let Some(mut ctx) = ctx() else {
             return;
         };
-        let greedy = run_proof_search(&ctx, unproducible_action(), 1);
+        let greedy = run_proof_search(&ctx, unproducible_action(), 1).expect("proof search");
         assert_eq!(greedy.status, NodeStatus::Sorry);
-        for (batch, alt_cost) in [(1, 0), (4, 0), (1, 8), (4, 8)] {
-            ctx.top_n = Some(TopNConfig {
-                alt_cost,
-                ..config(3, false, batch)
-            });
-            let top3 = run_proof_search(&ctx, unproducible_action(), 1);
-            assert_eq!(
-                top3.status,
-                NodeStatus::Contradictory,
-                "batch={batch} alt_cost={alt_cost}"
-            );
+        for batch in [1, 4] {
+            ctx.top_n = Some(config(3, false, batch));
+            let top3 = run_proof_search(&ctx, unproducible_action(), 1).expect("proof search");
+            assert_eq!(top3.status, NodeStatus::Contradictory, "batch={batch}");
             assert!(
                 matches!(top3.method, ProofMethod::SolveGoal(_)),
                 "the proof uses the second-ranked method, got {:?}",

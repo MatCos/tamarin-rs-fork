@@ -6,18 +6,19 @@
 
 use std::sync::Arc;
 
-use tamarin_parser::ast as p;
+use tamarin_parser::parser::parse_formula_str;
 use tamarin_term::builtin::{dh_neutral, exp, fst, mult, pair, snd};
 use tamarin_term::function_symbols::{nat_one_sym, AcSym, Constructability, NoEqSym, Privacy};
 use tamarin_term::lterm::{pub_term, LNTerm, LSort, LVar};
+use tamarin_term::maude_sig::nat_maude_sig;
 use tamarin_term::subst_vfresh::SubstVFresh;
 use tamarin_term::term::{f_app_ac, f_app_no_eq};
 use tamarin_term::vterm::var_term;
 
 use super::*;
 use crate::constraint::constraints::Disj;
+use crate::elaborate::formula_to_guarded_parsed;
 use crate::fact::{ku_fact, proto_fact, Fact, FactAnnotation, FactTag, Multiplicity};
-use crate::guarded::formula_to_guarded;
 use crate::rule::{ConcIdx, PremIdx};
 use crate::tools::equation_store::EqDisj;
 use crate::tools::EquationStore;
@@ -164,15 +165,8 @@ fn f_and_l_name_prefixes_are_dropped() {
     assert_eq!(premise(Multiplicity::Linear, "F_L_X"), "L_X(ltkR.0:fresh)");
     assert_eq!(premise(Multiplicity::Linear, "XF_Y"), "XF_Y(ltkR.0:fresh)");
     // Facts inside formulas go through the same `showFactTag`.
-    let inv = p::Formula::Forall(
-        vec![pvar("j", 0, p::SortHint::Node)],
-        Box::new(p::Formula::Implies(
-            Box::new(action("F_Inv", vec![msg("id")], vec![], node("j"))),
-            Box::new(p::Formula::False),
-        )),
-    );
     assert_eq!(
-        disj_args(vec![inv]),
+        disj_args(&["All #j. F_Inv(id) @ #j ==> F"]),
         ["All j.0:node. (Inv(id.0:msg) @ j.0:node) ==> F"]
     );
 }
@@ -238,121 +232,29 @@ fn split_goals_print_each_case_of_the_split() {
     assert!(args_of(Goal::Split(SplitId(7)), &sys).1.is_empty());
 }
 
-fn pv(name: &str, idx: u64, sort: p::SortHint) -> p::Term {
-    p::Term::Var(pvar(name, idx, sort))
-}
-
-fn pvar(name: &str, idx: u64, sort: p::SortHint) -> p::VarSpec {
-    p::VarSpec {
-        name: name.into(),
-        idx,
-        sort,
-        typ: None,
-    }
-}
-
-fn action(name: &str, args: Vec<p::Term>, anns: Vec<p::FactAnnotation>, at: p::Term) -> p::Formula {
-    let fact = p::Fact {
-        persistent: false,
-        name: name.into(),
-        args,
-        annotations: anns,
-    };
-    p::Formula::Atom(p::Atom::Action(fact, at))
-}
-
-fn node(name: &str) -> p::Term {
-    pv(name, 0, p::SortHint::Node)
-}
-
-fn msg(name: &str) -> p::Term {
-    pv(name, 0, p::SortHint::Untagged)
-}
-
-fn last(t: p::Term) -> p::Formula {
-    p::Formula::Atom(p::Atom::Last(t))
-}
-
-fn and(a: p::Formula, b: p::Formula) -> p::Formula {
-    p::Formula::And(Box::new(a), Box::new(b))
-}
-
-fn disj_args(formulas: Vec<p::Formula>) -> Vec<String> {
+/// The Disj goal over `formulas`, each parsed and converted to a guarded
+/// formula.
+fn disj_args(formulas: &[&str]) -> Vec<String> {
+    let sig = nat_maude_sig();
     let gs = formulas
         .iter()
-        .map(|f| formula_to_guarded(f).unwrap())
+        .map(|s| formula_to_guarded_parsed(&parse_formula_str(s, &sig).unwrap(), &sig).unwrap())
         .collect();
     args_of(Goal::Disj(Disj(gs)), &System::empty()).1
 }
 
 #[test]
 fn disj_goals_print_each_disjunct() {
-    let msg_tag = || {
-        p::Term::Pair(vec![
-            p::Term::PubLit("UE".into()),
-            p::Term::PubLit("eNB".into()),
-            p::Term::PubLit("K_eNB_star".into()),
-            msg("r"),
-        ])
-    };
-    // Ex j. Running(b, a, tag) @ j & not(last(j))
-    //   & All a2 b2 i2. Commit(a2, b2, tag) @ i2 ==> (last(i2) | i2 = i)
-    let commit = p::Formula::Forall(
-        vec![
-            pvar("a2", 0, p::SortHint::Untagged),
-            pvar("b2", 0, p::SortHint::Untagged),
-            pvar("i2", 0, p::SortHint::Node),
-        ],
-        Box::new(p::Formula::Implies(
-            Box::new(action(
-                "Commit",
-                vec![msg("a2"), msg("b2"), msg_tag()],
-                vec![],
-                node("i2"),
-            )),
-            Box::new(p::Formula::Or(
-                Box::new(last(node("i2"))),
-                Box::new(p::Formula::Atom(p::Atom::Eq(node("i2"), node("i")))),
-            )),
-        )),
-    );
-    let running = p::Formula::Exists(
-        vec![pvar("j", 0, p::SortHint::Node)],
-        Box::new(and(
-            action(
-                "Running",
-                vec![msg("b"), msg("a"), msg_tag()],
-                vec![],
-                node("j"),
-            ),
-            and(p::Formula::Not(Box::new(last(node("j")))), commit),
-        )),
-    );
-    // All #k. K(GTK)[+] @ k ==> F
-    let gtk = p::Formula::Forall(
-        vec![pvar("k", 0, p::SortHint::Node)],
-        Box::new(p::Formula::Implies(
-            Box::new(action(
-                "K",
-                vec![msg("GTK")],
-                vec![p::FactAnnotation::SolveFirst],
-                node("k"),
-            )),
-            Box::new(p::Formula::False),
-        )),
-    );
-    let less = p::Formula::Atom(p::Atom::Less(node("i"), node("j")));
-    // (n %+ %1) << n.1, both sides free.
-    let subterm = p::Formula::Atom(p::Atom::Subterm(
-        p::Term::BinOp(
-            p::BinOp::NatPlus,
-            Box::new(pv("n", 0, p::SortHint::Nat)),
-            Box::new(p::Term::NatOne),
-        ),
-        pv("n", 1, p::SortHint::Untagged),
-    ));
     assert_eq!(
-        disj_args(vec![running, gtk, less, subterm]),
+        disj_args(&[
+            "Ex #j. Running(b, a, <'UE', 'eNB', 'K_eNB_star', r>) @ #j & not(last(#j)) \
+             & (All a2 b2 #i2. Commit(a2, b2, <'UE', 'eNB', 'K_eNB_star', r>) @ #i2 \
+             ==> (last(#i2) | #i2 = #i))",
+            "All #k. K(GTK)[+] @ #k ==> F",
+            "#i < #j",
+            // Both sides free.
+            "(%n %+ %1) << n.1",
+        ]),
         [
             "Ex j.0:node. (Running(b.0:msg, a.0:msg, <'UE', 'eNB', 'K_eNB_star', r.0:msg>) @ j.0:node) \
              & (not(last(j.0:node))) & (All a2.0:msg b2.0:msg i2.0:node. \

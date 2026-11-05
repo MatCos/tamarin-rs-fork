@@ -1,15 +1,14 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Pins the ORDER `formulaReports` emits its findings in, end to end —
 //! `formula_reports` list order plus `prettyWfErrorReport`'s grouping.
 //!
 //! HS runs all three arms inside the `annFormulas` loop
 //! (`msum [checkQuantifiers, checkTerms, checkGuarded]`,
-//! Wellformedness.hs:999-1014, see lines 1002-1004), so the topics INTERLEAVE
+//! Wellformedness.hs), so the topics INTERLEAVE
 //! per formula and a topic REOPENS after an intervening one — `groupOn fst`
-//! merges only CONSECUTIVE entries (Extension/Prelude.hs:96-97).  Emitting one
+//! merges only CONSECUTIVE entries (Extension/Prelude.hs).  Emitting one
 //! whole block per topic instead would collapse the runs into a single header
 //! each and reorder the bodies.
 //!
@@ -24,12 +23,11 @@ use tamarin_theory::pretty_theory::format_wf_block;
 fn wf_block(src: &str) -> String {
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = tamarin_theory::elaborate::elaborate(&thy).expect("elaborate");
-    let errs =
-        tamarin_theory::formula_reports::formula_reports(&thy, &elaborated.signature.maude_sig);
+    let errs = tamarin_theory::wellformedness::formulas::formula_reports(&elaborated);
     format_wf_block(&errs)
 }
 
-/// The paragraph every `checkTerms` body ends with (Wellformedness.hs:968-973),
+/// The paragraph every `checkTerms` body ends with (Wellformedness.hs),
 /// already at the two-space indent `ppTopic` gives a group's bodies.
 const ALLOWED_LINES: &[&str] = &[
     "  The only allowed terms are public constants and bound node and",
@@ -146,7 +144,7 @@ fn a_formula_tripping_two_arms_splits_the_terms_group() {
     assert_eq!(wf_block(src), expected.join("\n"));
 }
 
-/// `checkQuantifiers` (Wellformedness.hs:948-957) is the FIRST arm, so a
+/// `checkQuantifiers` (Wellformedness.hs) is the FIRST arm, so a
 /// formula tripping it and `checkTerms` reports the quantifier finding first;
 /// consecutive quantifier findings share one header.
 #[test]
@@ -191,8 +189,7 @@ fn all_three_arms_of_one_formula_come_out_in_msum_order() {
                end\n";
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = tamarin_theory::elaborate::elaborate(&thy).expect("elaborate");
-    let errs =
-        tamarin_theory::formula_reports::formula_reports(&thy, &elaborated.signature.maude_sig);
+    let errs = tamarin_theory::wellformedness::formulas::formula_reports(&elaborated);
     let topics: Vec<&str> = errs.iter().map(|e| e.topic.as_str()).collect();
     assert_eq!(
         topics,

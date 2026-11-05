@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Theory.Constraint.System.JSON` — serialise the graph part of a
 //! constraint [`System`] to the JSON graph format the interactive frontend
@@ -8,8 +7,8 @@
 //!
 //! See `lib/theory/src/Theory/Constraint/System/JSON.hs`.
 //!
-//! Only the `sequentsToJSONPretty` variant (JSON.hs:564-569) is ported: it is
-//! the one both the web handler (`src/Web/Handler.hs:1435-1444`) and the batch
+//! Only the `sequentsToJSONPretty` variant (JSON.hs) is ported: it is
+//! the one both the web handler (`src/Web/Handler.hs`) and the batch
 //! trace export (`src/Main/Mode/Batch.hs`) call, so the HS `pretty` flag is
 //! always `True` here — every fact carries its `prettyLNFact` rendering and
 //! every outermost term its `show`n form.
@@ -19,7 +18,7 @@
 //! value, empty containers inline, no trailing newline) over
 //! `Data.Aeson.Text`'s string escaper — aeson-pretty's `fromValue` hands
 //! every scalar to `Aeson.encodeToTextBuilder` — followed by
-//! `removePseudoUnicode` (JSON.hs:228-239).  That escaper differs from
+//! `removePseudoUnicode` (JSON.hs).  That escaper differs from
 //! `serde_json`'s: 0x08 and 0x0c take the generic `\u00xx` form where
 //! `serde_json` emits `\b` / `\f`, so the encoder cannot be delegated to
 //! `serde_json`.  `<`, `>` and `&` all reach the wire literally
@@ -33,17 +32,17 @@ use serde_json::{Map, Value};
 
 use tamarin_term::function_symbols::{plain_show_bytes, show_acfct_sym, AcSym, FunSym};
 use tamarin_term::lterm::{LNTerm, LVar, Name};
-use tamarin_term::term::Term;
+use tamarin_term::term::{show_term, Term};
 use tamarin_term::vterm::Lit;
 
 use crate::constraint::constraints::{NodeConc, NodeId, NodePrem, Reason};
-use crate::constraint::solver::tactic_show::show_lnterm;
-use crate::fact::{fact_tag_multiplicity, show_fact_tag, FactTag, LNFact, Multiplicity};
+use crate::fact::{
+    fact_tag_multiplicity, is_proto_fact, show_fact_tag, FactTag, LNFact, Multiplicity,
+};
 use crate::pretty_hpj::{fsep, punctuate, Doc, DEFAULT_LINE_LENGTH, DEFAULT_RIBBON};
 use crate::rule::{
-    is_coerce_rule_info, is_constr_rule_info, is_destr_rule_info, is_fresh_constr_rule_info,
-    is_iequality_rule_info, is_irecv_rule_info, is_isend_rule_info, is_nat_constr_rule_info,
-    is_pub_constr_rule_info, rule_name_string, ProtoRuleName, RuleACInst, RuleInfo,
+    is_constr_rule, is_destr_rule, is_irecv_rule_info, is_isend_rule_info, rule_name_string,
+    ProtoRuleName, RuleACInst, RuleInfo,
 };
 
 use crate::constraint::system::graph::abbreviation::order_abbreviations_for_json;
@@ -56,7 +55,7 @@ use crate::constraint::system::graph::repr::{Cluster, GEdge, GNode, MissingHint,
 use crate::constraint::system::graph::{system_to_graph, Graph};
 use crate::constraint::system::NodeRuleMap;
 
-/// HS `resolveNodePremFact` (System.hs:926-927) via Graph.hs:87-90.
+/// HS `resolveNodePremFact` (System.hs) via Graph.hs.
 fn resolve_node_prem_fact<'a>(prem: &NodePrem, rules: &NodeRuleMap<'a>) -> Option<&'a LNFact> {
     rules
         .get(&prem.0)
@@ -64,7 +63,7 @@ fn resolve_node_prem_fact<'a>(prem: &NodePrem, rules: &NodeRuleMap<'a>) -> Optio
         .and_then(|ru| ru.premises.get(prem.1 .0))
 }
 
-/// HS `resolveNodeConcFact` (System.hs:930-931) via Graph.hs:93-96.
+/// HS `resolveNodeConcFact` (System.hs) via Graph.hs.
 fn resolve_node_conc_fact<'a>(conc: &NodeConc, rules: &NodeRuleMap<'a>) -> Option<&'a LNFact> {
     rules
         .get(&conc.0)
@@ -76,7 +75,7 @@ fn resolve_node_conc_fact<'a>(conc: &NodeConc, rules: &NodeRuleMap<'a>) -> Optio
 // String helpers
 // ---------------------------------------------------------------------
 
-/// Port of `cleanString` (JSON.hs:213-218) — flatten a rendered pretty-printer
+/// Port of `cleanString` (JSON.hs) — flatten a rendered pretty-printer
 /// document onto one line.
 ///
 /// The HS equations rewrite and then RE-EXAMINE the rewritten prefix:
@@ -116,7 +115,7 @@ fn clean_string(s: &str) -> String {
     out
 }
 
-/// Port of `pps` (JSON.hs:221-222) — `cleanString . render`.
+/// Port of `pps` (JSON.hs) — `cleanString . render`.
 ///
 /// HS `render` is HughesPJ's default `style` (PageMode, `lineLength = 100`,
 /// `ribbonsPerLine = 1.5` ⇒ ribbon `round (100/1.5) = 67`), so a wide fact
@@ -125,7 +124,7 @@ fn pps(d: Doc) -> String {
     clean_string(&d.render_with(DEFAULT_LINE_LENGTH, DEFAULT_RIBBON))
 }
 
-/// Derived `Show` of `ACSym` (FunctionSymbols.hs:138-139).  The `ACfct`
+/// Derived `Show` of `ACSym` (FunctionSymbols.hs).  The `ACfct`
 /// constructor's argument is a tuple, whose `showsPrec` ignores the operator
 /// precedence, so no extra parentheses are added around it.
 fn show_ac_sym(o: &AcSym) -> String {
@@ -138,9 +137,9 @@ fn show_ac_sym(o: &AcSym) -> String {
     }
 }
 
-/// `show` of an `LNTerm` literal: `instance Show (Lit c v)` (VTerm.hs:98-100)
-/// delegating to `instance Show LVar` (LTerm.hs:550-557) and `instance Show
-/// Name` (LTerm.hs:235-240), both of which are the `Display` impls in
+/// `show` of an `LNTerm` literal: `instance Show (Lit c v)` (VTerm.hs)
+/// delegating to `instance Show LVar` (LTerm.hs) and `instance Show
+/// Name` (LTerm.hs), both of which are the `Display` impls in
 /// `tamarin_term::pretty`.
 ///
 /// `Show Name` covers `FreshName` (`~'x'`), `PubName` (`'x'`), `NodeName`
@@ -154,20 +153,14 @@ fn show_lit(l: &Lit<Name, LVar>) -> String {
 // Rule / edge classification
 // ---------------------------------------------------------------------
 
-/// Port of `getRuleType` (JSON.hs:247-260).  Guard ORDER is significant: the
+/// Port of `getRuleType` (JSON.hs).  Guard ORDER is significant: the
 /// generic `isIntruderRule` / `isProtocolRule` tests come last.
 fn get_rule_type(ru: &RuleACInst) -> &'static str {
     match &ru.info {
         RuleInfo::Intr(i) => {
-            // HS `isDestrRule` (Theory/Model/Rule.hs:694-698) also covers `IEqualityRule`.
-            if is_destr_rule_info(i) || is_iequality_rule_info(i) {
+            if is_destr_rule(i) {
                 "isDestrRule"
-            } else if is_constr_rule_info(i)
-                || is_fresh_constr_rule_info(i)
-                || is_pub_constr_rule_info(i)
-                || is_nat_constr_rule_info(i)
-                || is_coerce_rule_info(i)
-            {
+            } else if is_constr_rule(i) {
                 "isConstrRule"
             } else if is_irecv_rule_info(i) {
                 "isIRecvRule"
@@ -187,17 +180,17 @@ fn get_rule_type(ru: &RuleACInst) -> &'static str {
     }
 }
 
-/// HS `check p`, shared by `getRelationType` (JSON.hs:434-435) and `colorEdge`'s
-/// `SystemEdge` arm (JSON.hs:452-453): the TARGET premise's fact is tested
+/// HS `check p`, shared by `getRelationType` (JSON.hs) and `colorEdge`'s
+/// `SystemEdge` arm (JSON.hs): the TARGET premise's fact is tested
 /// first, then the SOURCE conclusion's.
 fn edge_fact_check(prem: Option<&LNFact>, conc: Option<&LNFact>, p: fn(&LNFact) -> bool) -> bool {
     prem.is_some_and(p) || conc.is_some_and(p)
 }
 
-/// The single classification `graphEdgeToJSONGraphEdge` (JSON.hs:467-495) needs
+/// The single classification `graphEdgeToJSONGraphEdge` (JSON.hs) needs
 /// per edge.
 ///
-/// `getRelationType` (JSON.hs:432-441) and `colorEdge` (JSON.hs:444-463) walk
+/// `getRelationType` (JSON.hs) and `colorEdge` (JSON.hs) walk
 /// the IDENTICAL `check` cascade over a `SystemEdge`'s endpoint facts and
 /// differ only in the string each arm yields, so an edge is classified once
 /// and both strings are read off the result.
@@ -211,7 +204,7 @@ enum EdgeClass {
 }
 
 impl EdgeClass {
-    /// `colorEdge` (JSON.hs:444-463).
+    /// `colorEdge` (JSON.hs).
     fn color(&self) -> &'static str {
         match self {
             EdgeClass::SystemK => "orangered2",
@@ -223,7 +216,7 @@ impl EdgeClass {
         }
     }
 
-    /// `jgeRelation` (JSON.hs:467-495): `getRelationType` for a `SystemEdge`,
+    /// `jgeRelation` (JSON.hs): `getRelationType` for a `SystemEdge`,
     /// a literal for the other two edge kinds.
     fn relation(&self) -> &'static str {
         match self {
@@ -246,7 +239,7 @@ fn classify_edge(edge: &GEdge, rules: &NodeRuleMap<'_>) -> EdgeClass {
                 EdgeClass::SystemK
             } else if edge_fact_check(prem, conc, LNFact::is_persistent) {
                 EdgeClass::SystemPersistent
-            } else if edge_fact_check(prem, conc, LNFact::is_proto) {
+            } else if edge_fact_check(prem, conc, is_proto_fact) {
                 EdgeClass::SystemProto
             } else {
                 EdgeClass::SystemDefault
@@ -271,10 +264,10 @@ fn object<'a>(fields: impl IntoIterator<Item = (&'a str, Value)>) -> Value {
     Value::Object(m)
 }
 
-/// Port of `lntermToJSONGraphNodeTerm` (JSON.hs:285-302) at `pretty = True`.
+/// Port of `lntermToJSONGraphNodeTerm` (JSON.hs) at `pretty = True`.
 ///
 /// `jgnShow` is populated for the OUTERMOST term only and omitted entirely
-/// when empty (JSON.hs:77-82), so nested subterms carry just `jgnFunct` /
+/// when empty (JSON.hs), so nested subterms carry just `jgnFunct` /
 /// `jgnParams`.  Terms that are neither a literal nor a `NoEq`/`AC`
 /// application fall into HS's catch-all `Const ("unknown term type: " ++ show
 /// t)`.
@@ -284,7 +277,7 @@ fn json_term(t: &LNTerm, outermost: bool) -> Value {
     let funct = |name: String, ts: &[LNTerm]| -> Value {
         let mut fields = vec![("jgnFunct", Value::String(name)), ("jgnParams", params(ts))];
         if outermost {
-            fields.push(("jgnShow", Value::String(show_lnterm(t))));
+            fields.push(("jgnShow", Value::String(show_term(t))));
         }
         object(fields)
     };
@@ -294,15 +287,15 @@ fn json_term(t: &LNTerm, outermost: bool) -> Value {
         Term::App(FunSym::Ac(o), ts) => funct(show_ac_sym(o), ts),
         _ => object([(
             "jgnConst",
-            Value::String(format!("unknown term type: {}", show_lnterm(t))),
+            Value::String(format!("unknown term type: {}", show_term(t))),
         )]),
     }
 }
 
-/// Port of `itemToJSONGraphNodeFact` (JSON.hs:305-319) at `pretty = True`.
+/// Port of `itemToJSONGraphNodeFact` (JSON.hs) at `pretty = True`.
 fn json_fact(id: String, f: &LNFact) -> Value {
     // `show (factTag f)` is the DERIVED Show of `FactTag`
-    // (Theory/Model/Fact.hs:137-148); the `ProtoFact` constructor never reaches it
+    // (Theory/Model/Fact.hs); the `ProtoFact` constructor never reaches it
     // because `isProtoFact` short-circuits to the literal "ProtoFact".
     let tag = match f.tag {
         FactTag::Proto(_, _, _) => "ProtoFact",
@@ -331,13 +324,13 @@ fn json_fact(id: String, f: &LNFact) -> Value {
     ])
 }
 
-/// Port of `factToJSONGraphNodeFact` (JSON.hs:325-327): premise/conclusion
+/// Port of `factToJSONGraphNodeFact` (JSON.hs): premise/conclusion
 /// facts are identified by `<node>:<prefix><index>`, 0-based.
 fn json_indexed_fact(prefix: &str, n: &NodeId, idx: usize, f: &LNFact) -> Value {
     json_fact(format!("{}:{}{}", n, prefix, idx), f)
 }
 
-/// `jgnActs` (JSON.hs:335 and JSON.hs:365): every action fact carries the
+/// `jgnActs` (JSON.hs and JSON.hs): every action fact carries the
 /// constant id "action"; only premise/conclusion facts get a record port.
 fn json_action_facts(facts: &[LNFact]) -> Value {
     Value::Array(
@@ -348,7 +341,7 @@ fn json_action_facts(facts: &[LNFact]) -> Value {
     )
 }
 
-/// Port of `nodeToJSONGraphNodeMetadata` (JSON.hs:331-338).
+/// Port of `nodeToJSONGraphNodeMetadata` (JSON.hs).
 fn json_metadata(n: &NodeId, ru: &RuleACInst) -> Value {
     object([
         ("jgnActs", json_action_facts(&ru.actions)),
@@ -376,7 +369,7 @@ fn json_metadata(n: &NodeId, ru: &RuleACInst) -> Value {
 }
 
 /// A `JSONGraphNodeFact` with only its id set — the stub HS emits for a node
-/// referenced by an edge but absent from `sNodes` (JSON.hs:395-402/415-422).
+/// referenced by an edge but absent from `sNodes` (JSON.hs).
 fn json_stub_fact(id: String) -> Value {
     object([
         ("jgnFactId", Value::String(id)),
@@ -388,8 +381,8 @@ fn json_stub_fact(id: String) -> Value {
     ])
 }
 
-/// Port of `graphNodeToJSONGraphNode` (JSON.hs:341-428).  `jgnMetadata` and
-/// `jgnColor` are omitted when absent (JSON.hs:201-208).
+/// Port of `graphNodeToJSONGraphNode` (JSON.hs).  `jgnMetadata` and
+/// `jgnColor` are omitted when absent (JSON.hs).
 fn json_node(node: &GNode, color_map: &NodeColorMap) -> Value {
     let nid = node.id.to_string();
     match &node.ty {
@@ -435,7 +428,7 @@ fn json_node(node: &GNode, color_map: &NodeColorMap) -> Value {
         NodeType::Missing(hint) => {
             // HS ignores the recorded conclusion/premise index and always
             // emits `c0` / `p0` here (the two `MissingNode` branches,
-            // JSON.hs:384-428, and the `a.d. TODO` at line 385 that says so).
+            // JSON.hs, and the `a.d. TODO` comment that says so).
             let stub =
                 |port: char| Value::Array(vec![json_stub_fact(format!("{}:{}0", nid, port))]);
             let (ty, concs, prems) = match hint {
@@ -459,7 +452,7 @@ fn json_node(node: &GNode, color_map: &NodeColorMap) -> Value {
     }
 }
 
-/// Port of `graphEdgeToJSONGraphEdge` (JSON.hs:467-495).  Less-edges address
+/// Port of `graphEdgeToJSONGraphEdge` (JSON.hs).  Less-edges address
 /// their endpoints by bare node id; the other two kinds use record ports.
 fn json_edge(edge: &GEdge, rules: &NodeRuleMap<'_>) -> Value {
     let class = classify_edge(edge, rules);
@@ -487,7 +480,7 @@ fn json_edge(edge: &GEdge, rules: &NodeRuleMap<'_>) -> Value {
     }
 }
 
-/// Port of `graphClusterToJSONGraphCluster` (JSON.hs:498-506).
+/// Port of `graphClusterToJSONGraphCluster` (JSON.hs).
 fn json_cluster(cluster: &Cluster, rules: &NodeRuleMap<'_>, color_map: &NodeColorMap) -> Value {
     object([
         (
@@ -508,7 +501,7 @@ fn json_cluster(cluster: &Cluster, rules: &NodeRuleMap<'_>, color_map: &NodeColo
     ])
 }
 
-/// Port of `sequentToJSONGraph` (JSON.hs:520-539).
+/// Port of `sequentToJSONGraph` (JSON.hs).
 fn json_graph(label: &str, graph: &Graph<'_>, color_map: &NodeColorMap) -> Value {
     // One index over the original system's nodes for every edge of this graph.
     let rules = graph.system.node_rule_map();
@@ -518,7 +511,7 @@ fn json_graph(label: &str, graph: &Graph<'_>, color_map: &NodeColorMap) -> Value
             Value::Array(
                 order_abbreviations_for_json(&graph.abbreviations)
                     .into_iter()
-                    // `graphAbbrevtoJSONGraphAbbrev` (JSON.hs:509-516).
+                    // `graphAbbrevtoJSONGraphAbbrev` (JSON.hs).
                     .map(|(term, abbrev, expansion)| {
                         object([
                             ("jgaAbbrev", json_term(abbrev, true)),
@@ -571,7 +564,7 @@ fn json_graph(label: &str, graph: &Graph<'_>, color_map: &NodeColorMap) -> Value
     ])
 }
 
-/// Port of `sequentsToJSONPretty` (JSON.hs:564-569).
+/// Port of `sequentsToJSONPretty` (JSON.hs).
 ///
 /// Renders `{"graphs": [...]}` with aeson-pretty's default 4-space indent and
 /// NO trailing newline.  The node colour palette is keyed off each system's
@@ -579,7 +572,7 @@ fn json_graph(label: &str, graph: &Graph<'_>, color_map: &NodeColorMap) -> Value
 /// compression/simplification.
 ///
 /// Upstream keeps the encoder's output a `ByteString` all the way to
-/// `BL.writeFile` (JSON.hs:564-569, `src/Web/Theory.hs:1335-1340`), so the
+/// `BL.writeFile` (JSON.hs, `src/Web/Theory.hs`), so the
 /// wire bytes are the document's own UTF-8 — which is what writing this
 /// `String` out as UTF-8 produces.
 ///
@@ -603,7 +596,7 @@ pub fn sequents_to_json_pretty(
 }
 
 /// [`sequents_to_json_pretty`] streamed into a writer, one graph at a time —
-/// the batch `--output-json` path (HS `BL.writeFile`, Batch.hs:270-272),
+/// the batch `--output-json` path (HS `BL.writeFile`, Batch.hs),
 /// where holding every graph's `Value` tree plus the finished document would
 /// scale peak RSS with total output size instead of the largest graph.
 ///
@@ -764,7 +757,7 @@ fn write_compound<T>(
     out.push(close);
 }
 
-/// HS `removePseudoUnicode` (JSON.hs:228-239), applied to `encodePretty`'s
+/// HS `removePseudoUnicode` (JSON.hs), applied to `encodePretty`'s
 /// (aeson-pretty at `defConfig`) output:
 /// two literal byte-substring rewrites over the chunk, applied in the
 /// order the HS composition gives them: `\u003c` → `<` first, then
@@ -835,9 +828,10 @@ mod tests {
         );
         let pk = f_app_no_eq(sym("pk", 1), vec![var("ltkA", LSort::Fresh)]);
         let t = f_app_no_eq(sym("aenc", 2), vec![pair, pk]);
-        assert_eq!(show_lnterm(&t), "aenc(pair('3',~nr),pk(~ltkA))");
+        assert_eq!(show_term(&t), "aenc(pair('3',~nr),pk(~ltkA))");
         // A nullary NoEq symbol shows as the bare name (no parentheses).
-        assert_eq!(show_lnterm(&f_app_no_eq(sym("g", 0), vec![])), "g");
+        let nullary: LNTerm = f_app_no_eq(sym("g", 0), vec![]);
+        assert_eq!(show_term(&nullary), "g");
     }
 
     // `jgnShow` is present on the OUTERMOST term only, and omitted entirely
@@ -871,7 +865,7 @@ mod tests {
         let x1 = lit(Lit::Var(LVar::new("x", LSort::Fresh, 1)));
         let (t0, t1) = (nest(&x0), nest(&x1));
         assert_eq!(
-            show_lnterm(&t0),
+            show_term(&t0),
             "g(f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,\
              f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,f(~x,~x)))))))))))))))))))))"
         );
@@ -1023,7 +1017,7 @@ mod tests {
 
     // The escaper runs over every string in the document, not just the label.
     // A pub-name literal carrying `&`, `<` and `>` is the reachable route:
-    // `singleQuotedString` (Token.hs:452-453) accepts every character but
+    // `singleQuotedString` (Token.hs) accepts every character but
     // `'` and newline, and the name lands in `jgnLabel`, `jgnFactShow` and
     // `jgnConst` alike — all of them literal on the wire.
     #[test]
@@ -1081,8 +1075,8 @@ mod tests {
     }
 
     // `roleCluster` groups a rule's nodes under `<role>_Session_<n>`, and
-    // `sequentToJSONGraph` (JSON.hs:520-539) then serialises them through
-    // `graphClusterToJSONGraphCluster` (JSON.hs:498-506) instead of the
+    // `sequentToJSONGraph` (JSON.hs) then serialises them through
+    // `graphClusterToJSONGraphCluster` (JSON.hs) instead of the
     // top-level node list.  Every other pin in this module renders an
     // UNCLUSTERED system, so `jgClusters` is `[]` in all of them and the
     // cluster writer is unexercised.
@@ -1142,8 +1136,8 @@ mod tests {
         }
         // This checks the cluster order, which the `contains` checks above
         // cannot see.  HS builds the clusters from `Map.toList nodesByGroup`
-        // (GraphRepr.hs:123) over the `Map String [Node]` that
-        // `groupNodesByRole` (:139-144) accumulates.  Data.Map lists its keys
+        // (GraphRepr.hs) over the `Map String [Node]` that
+        // `groupNodesByRole` accumulates.  Data.Map lists its keys
         // in ascending order.  The roles therefore go into the output sorted
         // by name.
         let p = out

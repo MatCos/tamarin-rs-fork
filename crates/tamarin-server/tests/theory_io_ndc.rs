@@ -1,16 +1,15 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! `--no-ndc` on the web load path.
 //!
 //! HS hands the interactive mode's `TheoryLoadOptions` to `withWebUI` as the
-//! partially applied `loadTheory thyLoadOptions` (Interactive.hs:135), and
-//! `addParamsOptions`' `addNdcOption` (TheoryLoader.hs:821-826) writes
-//! `ndcCheck` — `not (argExists "no-ndc")` (TheoryLoader.hs:365-366) — into the
+//! partially applied `loadTheory thyLoadOptions` (Interactive.hs), and
+//! `addParamsOptions`' `addNdcOption` (TheoryLoader.hs) writes
+//! `ndcCheck` — `not (argExists "no-ndc")` (TheoryLoader.hs) — into the
 //! loaded theory's `_deductionChainCheck`.  `checkCloseIntrRule` reads that
 //! field back and runs `prettyNDCcheck` only when it holds
-//! (TheoryLoader.hs:513-519).  So a web load with the flag set must skip the
+//! (TheoryLoader.hs).  So a web load with the flag set must skip the
 //! NDC pass exactly like the `--prove` batch load does.
 //!
 //! Both verdicts are pinned to the ef3f0468 oracle on the `NdcXorr` fixture,
@@ -41,59 +40,7 @@ use std::path::PathBuf;
 
 use tamarin_server::theory_io;
 use tamarin_server::TheoryEntry;
-
-/// The absolute Maude locations that this test probes when `MAUDE_PATH` is
-/// unset.
-const MAUDE_CANDIDATES: [&str; 4] = [
-    "/home/linuxbrew/.linuxbrew/bin/maude",
-    "/usr/local/bin/maude",
-    "/usr/bin/maude",
-    "/opt/homebrew/bin/maude",
-];
-
-/// The Maude that this test runs against.  The function returns `$MAUDE_PATH`
-/// first.  If that variable is unset, it returns a [`MAUDE_CANDIDATES`] entry.
-/// If no candidate exists, it returns a `maude` that it finds on `$PATH`.
-///
-/// A `MAUDE_PATH` that names a file which does not exist is a configuration
-/// error, not a reason to skip.  A `None` answer there would make this test
-/// pass on a CI image that moved maude.  The function also panics when it
-/// finds no maude at all.  It returns `None` instead only when
-/// `TAM_ALLOW_NO_MAUDE=1` asks for the skip deliberately.  A load without
-/// maude cannot produce the NDC verdicts below.
-fn maude_bin_path() -> Option<String> {
-    if let Ok(p) = std::env::var("MAUDE_PATH") {
-        assert!(
-            std::path::Path::new(&p).exists(),
-            "MAUDE_PATH={p} does not exist; unset it to fall back to \
-             {MAUDE_CANDIDATES:?}, or point it at a real maude"
-        );
-        return Some(p);
-    }
-    if let Some(c) = MAUDE_CANDIDATES
-        .iter()
-        .find(|c| std::path::Path::new(c).exists())
-    {
-        return Some((*c).to_string());
-    }
-    let on_path = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|d| d.join("maude"))
-            .find(|c| c.is_file())
-            .map(|c| c.display().to_string())
-    });
-    if on_path.is_some() {
-        return on_path;
-    }
-    assert_eq!(
-        std::env::var("TAM_ALLOW_NO_MAUDE").as_deref(),
-        Ok("1"),
-        "no maude found: set MAUDE_PATH, put maude on $PATH, or set \
-         TAM_ALLOW_NO_MAUDE=1 to skip this pin deliberately — skipping \
-         silently would report green having checked no NDC verdict at all"
-    );
-    None
-}
+use tamarin_test_support::require_maude_path;
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -106,7 +53,7 @@ fn fixture() -> PathBuf {
 /// message page's "Signature" section renders (`web_signature_block`), where
 /// the NDC pass's tags surface as ` [AC,NDC]`.
 fn functions_line(entry: &TheoryEntry) -> String {
-    tamarin_theory::pretty_theory::web_signature_block(&entry.typed_theory.signature.maude_sig)
+    tamarin_theory::pretty_theory::web_signature_block(&entry.typed_theory.signature)
         .lines()
         .find(|l| l.starts_with("functions:"))
         .expect("signature block carries a functions: line")
@@ -133,7 +80,7 @@ fn ndc_tagged_cache_rules(entry: &TheoryEntry) -> usize {
 
 #[test]
 fn ndc_check_flag_gates_the_web_load_ndc_pass() {
-    let Some(maude) = maude_bin_path() else {
+    let Some(maude) = require_maude_path() else {
         return;
     };
     // The process-wide setup `serve` applies, so the signature renders at the
@@ -141,12 +88,16 @@ fn ndc_check_flag_gates_the_web_load_ndc_pass() {
     tamarin_server::init_process_globals();
     let path = fixture();
     // `derivcheck_timeout = 0` skips the dynamic derivation checks, which this
-    // test does not observe (HS `TheoryLoader.hs:578-579` skips them on EQ).
-    let deriv_off = 0;
+    // test does not observe (HS `TheoryLoader.hs` skips them on EQ).
+    let mut cfg = tamarin_server::ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        std::path::PathBuf::new(),
+        maude,
+    );
+    cfg.derivcheck_timeout = 0;
 
-    // Flag absent — HS `ndcCheck = True` (TheoryLoader.hs:279), the pass runs.
-    theory_io::set_ndc_check(true);
-    let checked = theory_io::load_from_path(&path, &maude, deriv_off).expect("fixture loads");
+    // Flag absent — HS `ndcCheck = True` (TheoryLoader.hs), the pass runs.
+    let checked = theory_io::load_from_path(&path, &cfg).expect("fixture loads");
     assert_eq!(
         functions_line(&checked),
         "functions: fst/1, pair/2, snd/1, zeroo/0, xorr/2 [AC,NDC]",
@@ -156,10 +107,10 @@ fn ndc_check_flag_gates_the_web_load_ndc_pass() {
         "the pass tags the xorr destructor rules it found NDC",
     );
 
-    // `--no-ndc` — HS's `else (sign, intrRules)` branch (TheoryLoader.hs:517):
+    // `--no-ndc` — HS's `else (sign, intrRules)` branch (TheoryLoader.hs):
     // no verdicts, no signature tags, cache in raw assembly order.
-    theory_io::set_ndc_check(false);
-    let skipped = theory_io::load_from_path(&path, &maude, deriv_off).expect("fixture loads");
+    cfg.ndc_check = false;
+    let skipped = theory_io::load_from_path(&path, &cfg).expect("fixture loads");
     assert_eq!(
         functions_line(&skipped),
         "functions: fst/1, pair/2, snd/1, zeroo/0, xorr/2 [AC]",
@@ -169,7 +120,4 @@ fn ndc_check_flag_gates_the_web_load_ndc_pass() {
         0,
         "a skipped pass tags nothing",
     );
-
-    // Back to the default every other load in this process expects.
-    theory_io::set_ndc_check(true);
 }

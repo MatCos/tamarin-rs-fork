@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Root + housekeeping handlers.
 
@@ -18,7 +17,7 @@ use crate::state::{AppState, TheoryOrigin};
 use crate::theory_io;
 
 /// `GET /` — Welcome page listing loaded theories.  Mirror Haskell's
-/// `rootTpl` (`src/Web/Hamlet.hs:53-81`).
+/// `rootTpl` (`src/Web/Hamlet.hs`).
 pub async fn get(State(state): State<Arc<AppState>>) -> Response {
     let html = render_index(&state);
     html_response(html)
@@ -26,13 +25,16 @@ pub async fn get(State(state): State<Arc<AppState>>) -> Response {
 
 /// `POST /` — File upload (multipart `uploadedTheory`).
 pub async fn post(State(state): State<Arc<AppState>>, mut mp: Multipart) -> Response {
-    // Mirror Haskell `postRootR` (src/Web/Handler.hs:791-825): a missing
+    // Mirror Haskell `postRootR` (src/Web/Handler.hs): a missing
     // `uploadedTheory` field → "Post request failed."; an empty file →
     // "No theory file given."; a load error → "Theory loading failed:…";
     // success → "Loaded new theory!".
     let mut alert_msg: Option<String> = None;
     let mut found_field = false;
-    while let Some(field) = mp.next_field().await.unwrap_or(None) {
+    loop {
+        let Some(field) = mp.next_field().await.unwrap_or(None) else {
+            break;
+        };
         if field.name() != Some("uploadedTheory") {
             continue;
         }
@@ -50,30 +52,25 @@ pub async fn post(State(state): State<Arc<AppState>>, mut mp: Multipart) -> Resp
             break;
         }
         let src = match std::str::from_utf8(&bytes) {
-            Ok(s) => s.to_string(),
+            Ok(s) => s,
             Err(_) => {
                 alert_msg = Some("upload was not valid UTF-8".into());
                 break;
             }
         };
-        match theory_io::load_from_source(
-            &src,
-            TheoryOrigin::Upload(filename.clone()),
-            &state.cfg.maude_path,
-            state.cfg.derivcheck_timeout,
-        ) {
+        match theory_io::load_from_source(src, TheoryOrigin::Upload(filename.clone()), &state.cfg) {
             Ok(entry) => {
                 let idx = state.store.insert(entry);
                 tracing::info!(idx, file = %filename, "uploaded theory");
                 // Haskell appends a ` WARNING: ignoring the following
                 // wellformedness errors: …` suffix to this alert when the
-                // report is non-empty (Handler.hs:813-818).  The Rust port
+                // report is non-empty (Handler.hs).  The Rust port
                 // emits the bare message; the same report is still surfaced on
                 // the theory page (the `wf-warning` banner + the source/message
                 // `/* WARNING */` block, both from `entry.wf_report`).
                 alert_msg = Some("Loaded new theory!".into());
             }
-            // HS `postRootR` (src/Web/Handler.hs:791-825, see line 809):
+            // HS `postRootR` (src/Web/Handler.hs):
             //   `setMessage $ "Theory loading failed:\n" <> toHtml (show err)`
             // — a NEWLINE separates the prefix from the error, not a space.
             // The '\n' survives both HS Blaze escaping and our `html_escape`
@@ -120,12 +117,12 @@ pub async fn robots() -> impl IntoResponse {
 /// `invalidArgs` (400) when it's missing; on success it returns
 /// `Canceled request!` as `text/plain`.
 ///
-/// See `getKillThreadR` in `src/Web/Handler.hs:1517-1534`.
+/// See `getKillThreadR` in `src/Web/Handler.hs`.
 ///
 /// We don't yet wire a `tokio_util::sync::CancellationToken` registry,
 /// so the "cancel" is a soft ack — but the 400-on-missing-path
 /// semantics match Haskell exactly so frontend dispatch works.
-pub async fn kill_thread(
+pub(crate) async fn kill_thread(
     axum::extract::Query(q): axum::extract::Query<KillQuery>,
 ) -> impl IntoResponse {
     match q.path {
@@ -146,7 +143,7 @@ pub async fn kill_thread(
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct KillQuery {
+pub(crate) struct KillQuery {
     pub path: Option<String>,
 }
 
@@ -157,15 +154,14 @@ pub struct KillQuery {
 // ---------------------------------------------------------------------
 fn render_index(state: &AppState) -> String {
     let theories = state.store.list();
-    // HS `theoriesTpl` (Web/Hamlet.hs:84-101): the `<table>…</table><br>` (or
+    // HS `theoriesTpl` (Web/Hamlet.hs): the `<table>…</table><br>` (or
     // the empty-branch `<strong>No theories loaded!</strong><br>`) that fills
-    // the second `intropage` `<p>` of `rootTpl`.
+    // the second `intropage` of `rootTpl`.
     let theories_content = if theories.is_empty() {
         "<strong>No theories loaded!</strong><br>".to_string()
     } else {
-        // HS `theoryTpl` (Web/Hamlet.hs:116-134): one `<tr>` per theory.  The
-        // `<thead>` emits four bare `<th>…</th>` (no `<tr>`), exactly as hamlet
-        // renders it.
+        // HS `theoryTpl` (Web/Hamlet.hs): one `<tr>` per theory.  The
+        // header row follows upstream PR #928’s corrected table structure.
         let mut rows = String::new();
         for t in &theories {
             let link = format!("/thy/trace/{}/overview/help", t.idx);
@@ -180,10 +176,12 @@ fn render_index(state: &AppState) -> String {
                 "<tr><td><a href=\"{link}\">{name}</a></td><td>{time}</td>{primary}<td>{origin}</td></tr>",
                 link = html_escape(&link),
                 name = html_escape(&t.name),
-                origin = html_escape(&t.origin.label()),
+                origin = html_escape(&t.origin),
             ));
         }
-        format!("<table><thead><th>Theory name</th><th>Time</th><th>Version</th><th>Origin</th></thead>{rows}</table><br>")
+        format!(
+            "<table><thead><tr><th>Theory name</th><th>Time</th><th>Version</th><th>Origin</th></tr></thead>{rows}</table><br>"
+        )
     };
     // Byte-faithful port of `rootTpl` + `introTpl` (Web/Hamlet.hs), the widget
     // body inside the shared [`default_layout`] frame.  Volatile substitutions:
@@ -193,7 +191,7 @@ fn render_index(state: &AppState) -> String {
     default_layout(
         "Welcome to the Tamarin prover",
         &format!(
-            r##"<div class="ui-layout-container"><div class="ui-layout-north"><div class="ui-layout-pane"><div class="layout-pane-north"><div class="ui-layout-pane-north"><div id="introbar"><div id="header-info">Running <a href=/><span class="tamarin">Tamarin</span></a> {version}</div></div></div></div></div></div></div><div id="logo"><p><img src="/static/img/tamarin-logo-3-0-0.png"></p></div><noscript><div class="warning">Warning: JavaScript must be enabled for the <span class="tamarin">Tamarin</span> prover GUI to function properly.</div></noscript><div class="intropage"><p>Core team: <a href="https://www.inf.ethz.ch/personal/basin/">David Basin</a>, <a href="https://cispa.saarland/group/cremers/">Cas Cremers</a>, <a href="https://www.jannikdreier.net">Jannik Dreier</a>, <a href="mailto:iridcode@gmail.com">Simon Meier</a>, <a href="https://people.inf.ethz.ch/rsasse/">Ralf Sasse</a>, <a href="https://beschmi.net">Benedikt Schmidt</a><br>Tamarin is a collaborative effort: see the <a href="https://tamarin-prover.com/manual/index.html">manual</a> for a more extensive overview of its development and additional contributors.</p><p>This program comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to redistribute it according to its <a href="/static/LICENSE" type="text/plain">LICENSE.</a></p><p>More information about Tamarin and technical papers describing the underlying theory can be found on the <a href="https://tamarin-prover.com"><span class="tamarin">Tamarin</span> webpage</a>.</p></div><div class="intropage"><p>{theories_content}</p><h2>Loading a new theory</h2><p>You can load a new theory file from disk in order to work with it.</p><form class="root-form" enctype="multipart/form-data" action="/" method="POST">Filename:<input type="file" name="uploadedTheory"><div class="submit-form"><input type="submit" value="Load new theory"></div></form><p>Note: You can save a theory by downloading the source from the Actions menu.</p></div>"##,
+            r##"<div class="ui-layout-container"><div class="ui-layout-north"><div class="ui-layout-pane"><div class="layout-pane-north"><div class="ui-layout-pane-north"><div id="introbar"><div id="header-info">Running <a href=/><span class="tamarin">Tamarin</span></a> {version}</div></div></div></div></div></div></div><div id="logo"><p><img src="/static/img/tamarin-logo-3-0-0.png"></p></div><noscript><div class="warning">Warning: JavaScript must be enabled for the <span class="tamarin">Tamarin</span> prover GUI to function properly.</div></noscript><div class="intropage"><p>Core team: <a href="https://www.inf.ethz.ch/personal/basin/">David Basin</a>, <a href="https://cispa.saarland/group/cremers/">Cas Cremers</a>, <a href="https://www.jannikdreier.net">Jannik Dreier</a>, <a href="mailto:iridcode@gmail.com">Simon Meier</a>, <a href="https://people.inf.ethz.ch/rsasse/">Ralf Sasse</a>, <a href="https://beschmi.net">Benedikt Schmidt</a><br>Tamarin is a collaborative effort: see the <a href="https://tamarin-prover.com/manual/index.html">manual</a> for a more extensive overview of its development and additional contributors.</p><p>This program comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to redistribute it according to its <a href="/static/LICENSE" type="text/plain">LICENSE.</a></p><p>More information about Tamarin and technical papers describing the underlying theory can be found on the <a href="https://tamarin-prover.com"><span class="tamarin">Tamarin</span> webpage</a>.</p></div><div class="intropage">{theories_content}<h2>Loading a new theory</h2><p>You can load a new theory file from disk in order to work with it.</p><form class="root-form" enctype="multipart/form-data" action="/" method="POST">Filename:<input type="file" name="uploadedTheory"><div class="submit-form"><input type="submit" value="Load new theory"></div></form><p>Note: You can save a theory by downloading the source from the Actions menu.</p></div>"##,
             version = env!("CARGO_PKG_VERSION"),
             theories_content = theories_content,
         ),

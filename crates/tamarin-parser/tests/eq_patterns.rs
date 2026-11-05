@@ -1,16 +1,15 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Where the SAPIC `=v` match pattern is grammar and where it is not.
 //!
 //! HS threads a PATTERN literal parser (`ltypedpatternlit = vlit
-//! sapicpatternvar`, Theory/Text/Parser/Sapic.hs:52-53) into exactly three
-//! positions: an `in` message (Parser/Sapic.hs:102,109), the pattern side of a
-//! process `let` binding (`sapicpatternterm`, Parser/Sapic.hs:61,264), and an
+//! sapicpatternvar`, Theory/Text/Parser/Sapic.hs) into exactly three
+//! positions: an `in` message (Parser/Sapic.hs), the pattern side of a
+//! process `let` binding (`sapicpatternterm`, Parser/Sapic.hs), and an
 //! embedded MSR rule with its `_restrict` formulas (`genericRule
-//! sapicpatternvar`, Parser/Sapic.hs:155).  `sapicpatternvar` itself is `=` followed
-//! by a VARIABLE (Token.hs:512-519) — never an application or a tuple.
+//! sapicpatternvar`, Parser/Sapic.hs).  `sapicpatternvar` itself is `=` followed
+//! by a VARIABLE (Token.hs) — never an application or a tuple.
 //! Everywhere else the literal parser has no `=` alternative, so a `=` starts
 //! no term at all.
 //!
@@ -28,11 +27,6 @@ use tamarin_parser::{parse_theory, ParseError};
 /// Parse expecting failure; return the error.
 fn parse_err(src: &str) -> ParseError {
     parse_theory(src, &[]).expect_err("the oracle rejects this source")
-}
-
-/// The rejected source's rendered parsec frame, named `eq.spthy`.
-fn frame(src: &str) -> String {
-    parse_err(src).with_source("eq.spthy").to_string()
 }
 
 /// The `SapicAction` chain of the theory's single top-level process,
@@ -74,7 +68,7 @@ fn in_message_keeps_the_pattern_marker_on_the_variable() {
     };
     // The parser stores the marker as-is; the SAPIC conversion strips it and
     // records the match-var (`unpattern`/`extractMatchingVariables`,
-    // Parser/Sapic.hs:113-114).
+    // Parser/Sapic.hs).
     assert!(
         matches!(&items[0], p::Term::PatMatch(inner)
             if matches!(&**inner, p::Term::Var(v) if v.name == "x")),
@@ -86,7 +80,7 @@ fn in_message_keeps_the_pattern_marker_on_the_variable() {
 #[test]
 fn pattern_variable_carries_its_sapic_type() {
     // `=x:nat` — `sapicvar` takes `option Nothing (colon *> typep)`
-    // (Token.hs:506-510).  Loads with exit 0 on both engines.
+    // (Token.hs).  Loads with exit 0 on both engines.
     let acts = process_actions(
         "theory T begin\nprocess:\n  in('c', x:nat); in('c', <=x:nat, y>); out('c', y)\nend\n",
     );
@@ -108,11 +102,11 @@ fn pattern_variable_carries_its_sapic_type() {
 #[test]
 fn embedded_msr_facts_and_restrict_formulas_take_patterns() {
     // The whole embedded rule parses with pattern literals (`genericRule
-    // sapicpatternvar`, Parser/Sapic.hs:155) — fact rows and `_restrict` formulas
+    // sapicpatternvar`, Parser/Sapic.hs) — fact rows and `_restrict` formulas
     // alike.  This is scripts/divergence_fixtures/sapic_msr_pattern_restrict
     // at the AST layer: the parser keeps both markers, and the SAPIC
     // conversion strips them (facts via `unpattern`, formulas via
-    // `unpatternVar` — Parser/Sapic.hs:156-160).
+    // `unpatternVar` — Parser/Sapic.hs).
     let acts = process_actions(
         "theory T begin\nprocess:\n  in('c', x); \
          [ St(=x) ] --[ Ev(x), _restrict( =x = x ) ]-> [ Out(x) ]\nend\n",
@@ -153,43 +147,39 @@ fn let_binding_pattern_side_takes_a_pattern_variable() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn eq_on_a_tuple_or_literal_pins_the_oracle_frame() {
-    // `sapicvar` starts with one of the five sort prefixes
-    // (`sortedLVarNoSuffix`, Token.hs:486-499); anything else fails with the
-    // alternation's five labels.  Both frames below are byte-identical to the
-    // pinned oracle's.
-    assert_eq!(
-        frame("theory T begin\nprocess:\n  in('c', =<x, y>); out('c', 'k')\nend\n"),
-        "\"eq.spthy\" (line 3, column 12):\n\
-         unexpected \"<\"\n\
-         expecting \"$\", \"~\", identifier, \"#\" or \"%\""
-    );
-    assert_eq!(
-        frame("theory T begin\nprocess:\n  in('c', ='d'); out('c', 'k')\nend\n"),
-        "\"eq.spthy\" (line 3, column 12):\n\
-         unexpected \"'\"\n\
-         expecting \"$\", \"~\", identifier, \"#\" or \"%\""
-    );
+fn pattern_markers_require_a_variable() {
+    for term in ["<x, y>", "'d'"] {
+        let source = format!("theory T begin\nprocess:\n  in('c', ={term}); out('c', 'k')\nend\n");
+        let error = parse_err(&source);
+        assert_eq!(
+            error.span().start,
+            source.find(&format!("={term}")).unwrap() + 1
+        );
+        assert!(
+            error
+                .diagnostic_notes()
+                .iter()
+                .any(|note| note.contains("pattern variable")),
+            "{error:?}"
+        );
+    }
 }
 
 #[test]
 fn eq_on_an_application_is_rejected_at_the_open_paren() {
     // `=h(x)` parses as the match-var `h`; the `(` then breaks the enclosing
-    // grammar.  Oracle frame (in): `(line 4, column 13): unexpected "(" /
-    // expecting letter or digit, ".", ":" or ")"`.  The port's position and
-    // `unexpected` token agree; its `expecting` labels still lack the
-    // variable hangovers (the pre-existing frame class).
+    // grammar. The error should point at the application's opening parenthesis.
     let e = parse_err(
         "theory T begin\nfunctions: h/1\nprocess:\n  in('c', =h(x)); out('c', 'ok')\nend\n",
     );
-    assert_eq!((e.line, e.col), (4, 13));
+    assert_eq!(e.line_column(), (4, 13));
 
     // Oracle frame (let): `(line 4, column 21): unexpected "(" /
     // expecting letter or digit, ".", ":" or "="`.
     let e = parse_err(
         "theory T begin\nfunctions: h/1\nprocess:\n  in('c', y); let =h(x) = y in out('c', 'ok')\nend\n",
     );
-    assert_eq!((e.line, e.col), (4, 21));
+    assert_eq!(e.line_column(), (4, 21));
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +188,7 @@ fn eq_on_an_application_is_rejected_at_the_open_paren() {
 
 #[test]
 fn eq_starts_no_term_outside_pattern_positions() {
-    // An `out` message parses with `ltypedlit` (Parser/Sapic.hs:117-131) and a plain
+    // An `out` message parses with `ltypedlit` (Parser/Sapic.hs) and a plain
     // rule's facts with `msgvar` — neither has a `=` alternative, so the
     // oracle stops at the `=` itself: `unexpected "=" / expecting term or
     // ")"`.  The port rejects at the same position through its
@@ -206,8 +196,8 @@ fn eq_starts_no_term_outside_pattern_positions() {
     // above).  Before the `allow_pat` gate the port PARSED these and died
     // later inside translation/elaboration with an unrelated message.
     let e = parse_err("theory T begin\nprocess:\n  in('c', x); out('c', =x)\nend\n");
-    assert_eq!((e.line, e.col), (3, 24));
+    assert_eq!(e.line_column(), (3, 24));
 
     let e = parse_err("theory T begin\nrule R: [ In(=x) ] --> [ Out(x) ]\nend\n");
-    assert_eq!((e.line, e.col), (2, 14));
+    assert_eq!(e.line_column(), (2, 14));
 }

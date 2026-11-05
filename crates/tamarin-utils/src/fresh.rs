@@ -1,15 +1,35 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Port of `Control.Monad.Fresh` and friends.
 //!
 //! The Haskell originals are monad transformers (`FreshT`) layered over user
 //! state. Rust callers just thread a `FreshState` value (or `&mut FreshState`)
 //! explicitly — no transformer stack required. We provide both the *fast*
-//! flavour (single counter) and the *precise* flavour (per-name counter).
+//! flavour (single counter) and the *precise* flavour (per-name counter),
+//! and the [`MonadFresh`] trait that abstracts over them.
 
 use crate::FastMap;
+
+// =============================================================================
+// The MonadFresh class
+// =============================================================================
+
+/// Supplies of fresh identifiers (`class MonadFresh`,
+/// Control/Monad/Fresh/Class.hs).
+///
+/// `scopeFreshness` (Control/Monad/Fresh/Class.hs) is not a trait
+/// method: each supply keeps its own inherent `scope_freshness`, which takes
+/// the scoped work as a closure.
+pub trait MonadFresh {
+    /// `freshIdent name` (Control/Monad/Fresh/Class.hs): the next fresh
+    /// identifier for this name.
+    fn fresh_ident(&mut self, name: &str) -> u64;
+
+    /// `freshIdents k` (Control/Monad/Fresh/Class.hs): reserve `k`
+    /// identifiers across all names and return the first one.
+    fn fresh_idents(&mut self, k: u64) -> u64;
+}
 
 // =============================================================================
 // Fast: single global counter.
@@ -42,17 +62,25 @@ impl FastFreshState {
         i
     }
 
-    /// Allocate one identifier.
-    pub fn fresh_ident(&mut self) -> u64 {
-        self.fresh_idents(1)
-    }
-
     /// Run `f` against this state but discard any allocations it made.
     pub fn scope_freshness<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
         let saved = self.next;
         let r = f(self);
         self.next = saved;
         r
+    }
+}
+
+/// `instance MonadFresh (Fast.FreshT m)`
+/// (Control/Monad/Fresh/Class.hs): the name is ignored,
+/// `freshIdent _name = freshIdents 1`.
+impl MonadFresh for FastFreshState {
+    fn fresh_ident(&mut self, _name: &str) -> u64 {
+        FastFreshState::fresh_idents(self, 1)
+    }
+
+    fn fresh_idents(&mut self, k: u64) -> u64 {
+        FastFreshState::fresh_idents(self, k)
     }
 }
 
@@ -77,7 +105,7 @@ impl PreciseFreshState {
         }
     }
 
-    /// Port of HS `avoidPreciseVars` (Term/LTerm.hs:706-709):
+    /// Port of HS `avoidPreciseVars` (Term/LTerm.hs):
     /// `foldl' (\m (name, idx) -> insertWith max name (idx+1) m) empty`.
     /// Seeds the per-name counters so the next `fresh_ident name` yields an
     /// index strictly greater than every avoided `(name, idx)`.  Used by
@@ -140,6 +168,19 @@ impl PreciseFreshState {
     }
 }
 
+/// `instance MonadFresh (Precise.FreshT m)`
+/// (Control/Monad/Fresh/Class.hs): both methods are the per-name
+/// supply's own.
+impl MonadFresh for PreciseFreshState {
+    fn fresh_ident(&mut self, name: &str) -> u64 {
+        PreciseFreshState::fresh_ident(self, name)
+    }
+
+    fn fresh_idents(&mut self, k: u64) -> u64 {
+        PreciseFreshState::fresh_idents(self, k)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,10 +188,23 @@ mod tests {
     #[test]
     fn fast_increments() {
         let mut s = FastFreshState::nothing_used();
-        assert_eq!(s.fresh_ident(), 0);
-        assert_eq!(s.fresh_ident(), 1);
+        assert_eq!(s.fresh_ident(""), 0);
+        assert_eq!(s.fresh_ident(""), 1);
         assert_eq!(s.fresh_idents(3), 2);
-        assert_eq!(s.fresh_ident(), 5);
+        assert_eq!(s.fresh_ident(""), 5);
+    }
+
+    #[test]
+    fn fast_fresh_ident_ignores_the_name() {
+        // `freshIdent _name = freshIdents 1`
+        // (Control/Monad/Fresh/Class.hs): the single counter advances by
+        // one whatever name is asked for, so two different names never share
+        // an index.
+        let mut s = FastFreshState::nothing_used();
+        assert_eq!(s.fresh_ident("x"), 0);
+        assert_eq!(s.fresh_ident("y"), 1);
+        assert_eq!(s.fresh_ident("x"), 2);
+        assert_eq!(s.fresh_ident(""), 3);
     }
 
     #[test]
@@ -160,19 +214,19 @@ mod tests {
         // `Sapic.States` passes the next free `StateChannel` index, and it
         // expects to get exactly that index back.
         let mut s = FastFreshState::seeded(7);
-        assert_eq!(s.fresh_ident(), 7);
+        assert_eq!(s.fresh_ident(""), 7);
         assert_eq!(s.fresh_idents(2), 8);
-        assert_eq!(s.fresh_ident(), 10);
+        assert_eq!(s.fresh_ident(""), 10);
     }
 
     #[test]
     fn fast_scope_rolls_back() {
         let mut s = FastFreshState::nothing_used();
-        s.fresh_ident();
+        s.fresh_ident("");
         s.scope_freshness(|s| {
             s.fresh_idents(10);
         });
-        assert_eq!(s.fresh_ident(), 1);
+        assert_eq!(s.fresh_ident(""), 1);
     }
 
     #[test]

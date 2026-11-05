@@ -1,22 +1,21 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Byte-pins `checkTerms`' irreducibility test when a user-declared `[AC]`
 //! symbol shares its NAME with a reducible builtin.
 //!
 //! HS's `allowed` guard is on the whole `FunSym`:
-//! ``FApp o args | o `S.member` irreducible`` (Wellformedness.hs:984).  A NoEq
+//! ``FApp o args | o `S.member` irreducible`` (Wellformedness.hs).  A NoEq
 //! head and an AC head are different `FunSym` constructors, so an irreducible
 //! `AC (ACfct (name, _))` never makes a NoEq application of the same `name`
 //! allowed.
 //!
 //! `builtins: diffie-hellman` plus `functions: exp/2 [AC]` separates the two.
-//! `^` is parsed by `expterm` (Theory/Text/Parser/Term.hs:176) as `fAppExp`,
-//! i.e. `fAppNoEq expSym` (Term/Term.hs:164), whatever the declaration says;
+//! `^` is parsed by `expterm` (Theory/Text/Parser/Term.hs) as `fAppExp`,
+//! i.e. `fAppNoEq expSym` (Term/Term.hs), whatever the declaration says;
 //! `dhReducibleFunSig = {NoEq expSym, NoEq invSym}`
-//! (Term/Term/FunctionSymbols.hs:307-308) is subtracted from
-//! `irreducibleFunSyms` (Term/Maude/Signature.hs:121-124), so that NoEq head
+//! (Term/Term/FunctionSymbols.hs) is subtracted from
+//! `irreducibleFunSyms` (Term/Maude/Signature.hs), so that NoEq head
 //! is REDUCIBLE and `'a' ^ 'b'` is an offender.  The user's
 //! `AC (ACfct exp)` stays in the irreducible set at the same time — nothing
 //! subtracts it — so an application of a user `[AC]` symbol is allowed.
@@ -31,8 +30,7 @@ use tamarin_theory::pretty_theory::format_wf_block;
 fn wf_block(src: &str) -> Option<String> {
     let thy = parse_theory(src, &[]).expect("parse");
     let elaborated = tamarin_theory::elaborate::elaborate(&thy).expect("elaborate");
-    let errs =
-        tamarin_theory::formula_reports::formula_reports(&thy, &elaborated.signature.maude_sig);
+    let errs = tamarin_theory::wellformedness::formulas::formula_reports(&elaborated);
     if errs.is_empty() {
         return None;
     }

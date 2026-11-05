@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! Integration tests for the graph routes.
 //!
@@ -26,8 +25,8 @@ use common::*;
 
 #[tokio::test]
 async fn intdot_returns_html_shell() {
-    // HS `getInteractiveDotGraphR` (`src/Web/Handler.hs:903-911`) returns the
-    // `intdotLayout True` HTML shell page (`src/Web/Types.hs:795-824`) — a
+    // HS `getInteractiveDotGraphR` (`src/Web/Handler.hs`) returns the
+    // `intdotLayout True` HTML shell page (`src/Web/Types.hs`) — a
     // `<dot-graph-viz>` custom element whose `dotsrc` points at the JSON graph
     // route (which the bundled client-side viz fetches and draws), wrapped in
     // the `.graph-page` container with the floating Options bar.  It is NOT
@@ -37,12 +36,7 @@ async fn intdot_returns_html_shell() {
     // does `withTheory`.  It therefore answers the shell for any theory path,
     // and a lemma path is one of them.  The oracle capture comes from a lemma
     // path.  The test compares the response byte for byte.
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/intdot/lemma/debug"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/intdot/lemma/debug").await;
     assert_eq!(res.status(), 200);
     assert_eq!(
         res.text().await.expect("text"),
@@ -51,12 +45,7 @@ async fn intdot_returns_html_shell() {
 
     // The shell's `dotsrc` is the same theory path, rendered again against the
     // json route.  An empty proof-tree case name therefore comes back as `_`.
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/intdot/proof/debug/_"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/intdot/proof/debug/_").await;
     assert_eq!(res.status(), 200);
     let body = res.text().await.expect("text");
     assert!(
@@ -70,7 +59,7 @@ async fn intdot_returns_html_shell() {
 /// `TheorySource` and `TheoryProof`; help / message / rules / lemma hit its
 /// catch-all `error "Unhandled theory path. This is a bug."` — a 500, not a
 /// 404 — and each route's copy of the clause is named in the CallStack
-/// (`imgThyPath` at `src/Web/Theory.hs:1416`, `dotGraphString` at `:2323`).
+/// (`imgThyPath` and `dotGraphString` in `src/Web/Theory.hs`).
 #[tokio::test]
 async fn dot_routes_unhandled_path_is_internal_error() {
     let s = start_server_with_theory("issue193.spthy").await;
@@ -90,7 +79,7 @@ async fn dot_routes_unhandled_path_is_internal_error() {
             "igd_unhandled_path.html",
         ),
     ] {
-        let res = s.client.get(s.url(path)).send().await.expect("send");
+        let res = s.get(path).await;
         assert_eq!(res.status(), 500, "{path} must be a 500");
         assert_eq!(
             res.text().await.expect("text"),
@@ -104,31 +93,25 @@ async fn dot_routes_unhandled_path_is_internal_error() {
 async fn interactive_graph_def_returns_dot() {
     let s = start_server_with_theory("issue193.spthy").await;
     let res = s
-        .client
-        .get(s.url("/thy/trace/1/interactive-graph-def/proof/debug"))
-        .send()
-        .await
-        .expect("send");
+        .get("/thy/trace/1/interactive-graph-def/proof/debug")
+        .await;
     assert_eq!(res.status(), 200);
     let body = res.text().await.expect("text");
     // The route answers `D.showDot "G"`'s container verbatim (`dotGraphString`,
-    // `src/Web/Theory.hs:2312-2318`): the QUOTED digraph id, and the blank line
+    // `src/Web/Theory.hs`): the QUOTED digraph id, and the blank line
     // `"\n}\n"` leaves before the closing brace
-    // (`lib/utils/src/Text/Dot.hs:246-248`).
+    // (`lib/utils/src/Text/Dot.hs`).
     // The document between them is pinned byte for byte against the oracle by
     // `interactive_graph_def_renders_source_cases`.
     assert!(body.starts_with("digraph \"G\" {\n"), "header: {body:.40}");
     assert!(body.ends_with("\n\n}\n"), "trailer: {body:?}");
 
     // A proof path that does not resolve is `dotGraphString`'s `Nothing`,
-    // which `getTheoryInteractiveGraphR` (`src/Web/Handler.hs:1464-1470`)
+    // which `getTheoryInteractiveGraphR` (`src/Web/Handler.hs`)
     // answers with `notFound`.
     let res = s
-        .client
-        .get(s.url("/thy/trace/1/interactive-graph-def/proof/debug/_"))
-        .send()
-        .await
-        .expect("send");
+        .get("/thy/trace/1/interactive-graph-def/proof/debug/_")
+        .await;
     assert_eq!(res.status(), 404);
 }
 
@@ -148,7 +131,7 @@ async fn interactive_graph_def_renders_source_cases() {
             "igd_cases_raw.dot",
         ),
     ] {
-        let res = s.client.get(s.url(path)).send().await.expect("send");
+        let res = s.get(path).await;
         assert_eq!(res.status(), 200, "{path} must be a 200");
         let body = res.text().await.expect("text");
         assert_eq!(
@@ -163,7 +146,7 @@ async fn interactive_graph_def_renders_source_cases() {
 /// Not Found page, 404, whichever end of the list the index falls off.
 ///
 /// Upstream feeds the index into `cases !! (i-1) !! (j-1)` unchecked
-/// (`src/Web/Theory.hs:1422` for `/graph`, `:2329` for
+/// (`src/Web/Theory.hs` for `/graph` and
 /// `/interactive-graph-def`), so these URLs answer 500 with the raw
 /// `Prelude.!!` text and its GHC CallStack; RS deliberately corrects that,
 /// which is why these are the only cases-route responses the port does not
@@ -187,16 +170,11 @@ async fn dot_routes_out_of_range_case_is_not_found() {
 
 #[tokio::test]
 async fn graph_json_returns_json_graph_with_dot_json_content_type() {
-    // HS `getTheoryGraphJsonR` (`src/Web/Handler.hs:1435-1444`) hands the
+    // HS `getTheoryGraphJsonR` (`src/Web/Handler.hs`) hands the
     // rendered file to `sendFile (fromString ".json")`, so the response
     // `Content-Type` is the literal string `.json`.
     let s = start_server_with_theory("issue193.spthy").await;
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/json/proof/debug"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/json/proof/debug").await;
     assert_eq!(res.status(), 200);
     assert_eq!(content_type(&res), ".json");
     let body = res.text().await.expect("text");
@@ -217,18 +195,15 @@ async fn graph_json_returns_json_graph_with_dot_json_content_type() {
 /// root, which carries no rule instances, so its assertions hold over an EMPTY
 /// graph and cannot see whether the solved systems survive.  Autoprove `debug`
 /// and re-read the witness node: its system must actually be there.  This is
-/// the regression guard for `init_process_globals`' `SysRetention::KeepAll` —
+/// the regression guard for the web session's `SysRetention::KeepAll` —
 /// without it every searched proof node drops its `System` and every
 /// post-autoprove graph renders empty.
 #[tokio::test]
 async fn graph_json_after_autoprove_carries_the_system() {
     let s = start_server_with_theory("issue193.spthy").await;
     let res = s
-        .client
-        .get(s.url("/thy/trace/1/autoprove/idfs/0/False/proof/debug"))
-        .send()
-        .await
-        .expect("send autoprove");
+        .get("/thy/trace/1/autoprove/idfs/0/False/proof/debug")
+        .await;
     assert_eq!(res.status(), 200);
     let redirect: serde_json::Value = res.json().await.expect("autoprove replies JSON");
     // `{"redirect": "/thy/trace/2/overview/proof/debug/<path>"}` — the graph
@@ -237,15 +212,7 @@ async fn graph_json_after_autoprove_carries_the_system() {
         .as_str()
         .expect("autoprove must redirect to the proved node")
         .replace("/overview/", "/json/");
-    let body = s
-        .client
-        .get(s.url(&target))
-        .send()
-        .await
-        .expect("send")
-        .text()
-        .await
-        .expect("text");
+    let body = s.get(&target).await.text().await.expect("text");
     let v: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
     let graph = &v["graphs"][0];
     assert!(
@@ -266,27 +233,38 @@ async fn graph_json_unresolvable_proof_path_is_empty_body() {
     // HS `proofPathCode` is `fromMaybe ""` over `resolveProofPath`, so an
     // unknown case name still answers 200 with an EMPTY body.
     let s = start_server_with_theory("issue193.spthy").await;
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/json/proof/debug/_/no_such_case"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/json/proof/debug/_/no_such_case").await;
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.expect("text"), "");
+}
+
+#[tokio::test]
+async fn unknown_lemma_is_an_unresolvable_graph_path() {
+    let s = start_server_with_theory("issue193.spthy").await;
+
+    let json = s.get("/thy/trace/1/json/proof/notALemma").await;
+    assert_eq!(json.status(), 200);
+    assert_eq!(json.text().await.expect("JSON body"), "");
+
+    for route in ["graph", "interactive-graph-def"] {
+        let response = s
+            .get(&format!("/thy/trace/1/{route}/proof/notALemma"))
+            .await;
+        assert_eq!(response.status(), 404, "{route}");
+    }
 }
 
 #[tokio::test]
 async fn graph_json_unhandled_path_is_internal_error() {
     // `graphJsonThyPath` handles only `TheorySource` / `TheoryProof`;
     // everything else hits `error "Unhandled theory path. This is a bug."`
-    // (`src/Web/Theory.hs:1318`), which Yesod renders as its 500 page — the
+    // (`src/Web/Theory.hs`), which Yesod renders as its 500 page — the
     // `defaultLayout` frame around `<h1>Internal Server Error</h1>` and the
     // exception text, byte-for-byte the captured Haskell response.
     let s = start_server_with_theory("issue193.spthy").await;
     let expected = haskell_capture("json_rules.html");
     for path in ["/thy/trace/1/json/rules", "/thy/trace/1/json/lemma/debug"] {
-        let res = s.client.get(s.url(path)).send().await.expect("send");
+        let res = s.get(path).await;
         assert_eq!(res.status(), 500, "{path} must be a 500");
         assert_eq!(
             content_type(&res),
@@ -300,10 +278,10 @@ async fn graph_json_unhandled_path_is_internal_error() {
 #[tokio::test]
 async fn graph_json_out_of_range_source_index_is_not_found() {
     // `parseCases` reads both indices with `safeRead` at `ReadS Int`
-    // (`src/Web/Types.hs:443`), so 0, a negative one and `Int` minBound all
+    // (`src/Web/Types.hs`), so 0, a negative one and `Int` minBound all
     // parse and reach the handler alongside a past-the-end one.  Upstream
     // hands every one of them to `casesCode`'s unchecked
-    // `cases !! (i-1) !! (j-1)` (`src/Web/Theory.hs:1322`), which raises: the
+    // `cases !! (i-1) !! (j-1)` (`src/Web/Theory.hs`), which raises: the
     // response is a 500 whose body is `Prelude.!!: negative index` or
     // `index too large` plus a CallStack naming the failing `!!` (minBound
     // wraps `i-1` to maxBound, so even that one reports "too large").  RS
@@ -326,17 +304,12 @@ async fn graph_json_out_of_range_source_index_is_not_found() {
 
 #[tokio::test]
 async fn graph_json_source_case_returns_json_graph() {
-    // `graphJsonThyPath`'s `TheorySource` branch (`src/Web/Theory.hs:1316`)
+    // `graphJsonThyPath`'s `TheorySource` branch (`src/Web/Theory.hs`)
     // serialises the `(i-1, j-1)` case system under the label
     // `Theory: <thy> Case: <i>:<j>` — the 1-based indices straight from the
     // path.  Covers the branch the out-of-range 404 above cannot reach.
     let s = start_server_with_theory("issue193.spthy").await;
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/json/cases/refined/1/1"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/json/cases/refined/1/1").await;
     assert_eq!(res.status(), 200);
     assert_eq!(content_type(&res), ".json");
     let body = res.text().await.expect("text");
@@ -357,25 +330,20 @@ async fn graph_json_source_case_returns_json_graph() {
 async fn graph_json_abbrev_in_backend_shortens_long_terms() {
     // `getTheoryGraphJsonR` runs the sub-proof's system through
     // `Web.Utils.abbrev` when `abbrevInBackend` is present
-    // (`src/Web/Handler.hs:1440`, `src/Web/Theory.hs:1330-1333`): every
+    // (`src/Web/Handler.hs`, `src/Web/Theory.hs`): every
     // premise/conclusion term of `size >= 30` is replaced by a
     // `Name AbbrevName` constant named after the term's head symbol, with an
     // occurrence counter from that symbol's SECOND abbreviation on.  The body
     // is byte-compared against the Haskell capture.
     let s = start_server_with_theory("BigTermProved.spthy").await;
     let path = "/thy/trace/1/json/proof/done/_/Init/Init";
-    let abbreviated = s
-        .client
-        .get(s.url(&format!("{path}?abbrevInBackend=1")))
-        .send()
-        .await
-        .expect("send");
+    let abbreviated = s.get(&format!("{path}?abbrevInBackend=1")).await;
     assert_eq!(abbreviated.status(), 200);
     let abbreviated = abbreviated.text().await.expect("text");
     assert_eq!(abbreviated, haskell_capture("json_proof_abbrev.json"));
 
     // The abbreviation constants render as their bare ids — no quotes, no
-    // sigil (`show (Name AbbrevName n) = show n`, LTerm.hs:240).
+    // sigil (`show (Name AbbrevName n) = show n`, LTerm.hs).
     assert!(
         abbreviated.contains(r#""jgnFactShow": "A( g3 )""#),
         "abbreviated fact must show the bare constant"
@@ -383,7 +351,7 @@ async fn graph_json_abbrev_in_backend_shortens_long_terms() {
 
     // Without the parameter the same node keeps its full terms, so the two
     // bodies differ.
-    let plain = s.client.get(s.url(path)).send().await.expect("send");
+    let plain = s.get(path).await;
     assert_eq!(plain.status(), 200);
     let plain = plain.text().await.expect("text");
     assert!(
@@ -397,7 +365,7 @@ async fn graph_json_abbrev_in_backend_shortens_long_terms() {
 fn dot_output_for_a_simple_system() {
     // The whole document `system_to_dot` produces for a one-rule system, which
     // is the only exercise that entry point gets: it pairs the batch writer's
-    // options (`Batch.hs:254-255`) with the web routes' label, a combination no
+    // options (`Batch.hs`) with the web routes' label, a combination no
     // upstream call site makes.  Every byte here is `Text.Dot`'s, anchored on
     // the oracle by
     // `constraint::system::dot::showdot::tests::single_rule_matches_the_oracle_bytes`:
@@ -450,7 +418,7 @@ fn dot_output_for_a_simple_system() {
 
 /// `--with-json` switches `/graph` to HS's `OutJSON` branch: the system's
 /// JSON graph is written to a file and `<json-cmd> <img> <json>` renders
-/// the image (`jsonToImg`, Web/Theory.hs:1484-1491).  A stub renderer
+/// the image (`jsonToImg`, Web/Theory.hs).  A stub renderer
 /// stands in for the tool: it checks it was handed a non-empty JSON file
 /// and writes a recognisable SVG.  A failing renderer is HS's
 /// `imgGenerated False` → the generic Not Found page.
@@ -480,12 +448,7 @@ async fn graph_renders_via_json_cmd_when_with_json_is_set() {
         cfg.json_path = Some(stub);
     })
     .await;
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/graph/proof/debug"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/graph/proof/debug").await;
     assert_eq!(res.status(), 200);
     assert_eq!(
         res.headers()
@@ -503,12 +466,7 @@ async fn graph_renders_via_json_cmd_when_with_json_is_set() {
         cfg.json_path = Some(stub);
     })
     .await;
-    let res = s
-        .client
-        .get(s.url("/thy/trace/1/graph/proof/debug"))
-        .send()
-        .await
-        .expect("send");
+    let res = s.get("/thy/trace/1/graph/proof/debug").await;
     assert_eq!(res.status(), 404);
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,17 +1,52 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 use super::*;
 use crate::lterm::{LNTerm, LSort, LVar};
 use crate::maude_sig::pair_maude_sig;
 use crate::vterm::Lit;
 
-use crate::test_maude::maude_path;
+use tamarin_test_support::require_maude_path;
+
+#[test]
+fn invalid_mult_detects_only_cancellable_products() {
+    use crate::builtin::{inv, msg_var, mult};
+
+    let a = msg_var("a", 0);
+    let b = msg_var("b", 0);
+    let c = msg_var("c", 0);
+    assert!(!invalid_mult(&[]));
+    assert!(!invalid_mult(&[inv(a.clone()), b.clone()]));
+    assert!(invalid_mult(&[inv(a.clone()), a.clone()]));
+    assert!(invalid_mult(&[
+        inv(mult(a.clone(), b.clone())),
+        b.clone(),
+        c.clone()
+    ]));
+    assert!(invalid_mult(&[inv(a), inv(b)]));
+
+    // Even an invariant-bypassing nullary `inv` still counts as an inverse
+    // for the two-inverses rejection rule.
+    let malformed_inv =
+        crate::term::unsafe_f_app(FunSym::NoEq(crate::function_symbols::inv_sym()), Vec::new());
+    assert!(invalid_mult(&[malformed_inv, inv(c)]));
+}
+
+#[test]
+fn invalid_xor_handles_canonical_and_unsafe_argument_order() {
+    use crate::builtin::msg_var;
+
+    let a = msg_var("a", 0);
+    let b = msg_var("b", 1);
+    let c = msg_var("c", 2);
+    assert!(!invalid_xor(&[a.clone(), b.clone(), c]));
+    assert!(invalid_xor(&[a.clone(), a.clone(), b.clone()]));
+    assert!(invalid_xor(&[a.clone(), b, a]));
+}
 
 #[test]
 fn norm_var_skips_maude() {
-    let path = match maude_path() {
+    let path = match require_maude_path() {
         Some(p) => p,
         None => return,
     };
@@ -25,7 +60,7 @@ fn norm_var_skips_maude() {
 #[test]
 #[allow(non_snake_case)]
 fn nf_via_haskell_detects_inverse_cancellation() {
-    let path = match maude_path() {
+    let path = match require_maude_path() {
         Some(p) => p,
         None => return,
     };
@@ -67,7 +102,7 @@ fn nf_via_haskell_detects_inverse_cancellation() {
 fn nf_via_haskell_maude_matches_user_ac_strule() {
     use crate::function_symbols::{AcFctSym, Constructability, NdcState, NoEqSym, Privacy};
     use crate::rewriting::RRule;
-    let path = match maude_path() {
+    let path = match require_maude_path() {
         Some(p) => p,
         None => return,
     };
@@ -147,7 +182,7 @@ fn nf_via_haskell_maude_matches_user_ac_strule() {
 fn cross_ac_symbol_strule_never_applies() {
     use crate::function_symbols::{AcFctSym, Constructability, NdcState, NoEqSym, Privacy};
     use crate::rewriting::{Equal, RRule};
-    let path = match maude_path() {
+    let path = match require_maude_path() {
         Some(p) => p,
         None => return,
     };
@@ -217,7 +252,7 @@ fn cross_ac_symbol_strule_never_applies() {
 }
 
 /// Both of HS's st-rule arms are guarded on the top symbol's kind —
-/// `FAppNoEq _ _` and `FAppACfct _ _` (Norm.hs:73-74) — so a term headed
+/// `FAppNoEq _ _` and `FAppACfct _ _` (Norm.hs) — so a term headed
 /// by a builtin AC operator or by `em` never reaches `struleApplicable`,
 /// however permissive the rule's LHS.  The sharpest witness is an st rule
 /// whose LHS is a bare variable: it matches every subject term, so an
@@ -229,7 +264,7 @@ fn cross_ac_symbol_strule_never_applies() {
 /// The rule is built directly because the text frontend cannot produce it:
 /// `rrule_to_ctxt_st_rule`'s ground-RHS branch rejects a bare-literal LHS
 /// outright (the deliberate divergence from HS's non-exhaustive
-/// `constantPositions`, SubtermRule.hs:67-71), and its non-ground branch
+/// `constantPositions`, SubtermRule.hs), and its non-ground branch
 /// rejects because every position it can find inside a variable LHS is the
 /// empty one.  `CtxtStRule` is `pub`, so the gate is what keeps `go_nf`
 /// HS-faithful for any in-process constructor.
@@ -288,7 +323,7 @@ fn bare_variable_strule_lhs_never_reduces_builtin_ac_or_c_terms() {
     // [variant]` into the MSG module makes every Maude `reduce` diverge
     // (the Haskell prover hangs on the equivalent `.spthy`), and the gate
     // means no rule of `sig` is ever sent over IPC anyway.
-    let path = match maude_path() {
+    let path = match require_maude_path() {
         Some(p) => p,
         None => return,
     };

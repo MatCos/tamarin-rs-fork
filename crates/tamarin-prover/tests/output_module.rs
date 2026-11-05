@@ -1,10 +1,9 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! End-to-end byte pins for `-m` / `--output-module` translate-only mode
-//! (Batch.hs:101-113): per-module stdout (`prettyOpenTheoryByModule`,
-//! TheoryLoader.hs:783-801, plus `withVersionAndReport`'s two trailing
+//! (Batch.hs): per-module stdout (`prettyOpenTheoryByModule`,
+//! TheoryLoader.hs, plus `withVersionAndReport`'s two trailing
 //! comments), the six-marker stderr with NO `Theory closed`, the deferred
 //! `-o`/`-O` write path, the `--quit-on-warning` abort shape, and the clap
 //! parse error for an unknown module value (rc 2, stderr, no maude probe,
@@ -105,8 +104,8 @@ fn run_translate(stem: &str, theory: &str, extra: &[&str]) -> (i32, String, Stri
 /// The oracle's stderr for every `-m spthy|spthytyped|msr` run on
 /// [`REPLICATION`], after the banner: exactly six markers — NO
 /// `[Theory Replication] Theory closed`, because translate mode goes through
-/// `translateAndCheckTheory` (TheoryLoader.hs:768-780), which never reaches
-/// `closeTranslatedTheory` and its `traceM` marker (:696).
+/// `translateAndCheckTheory` (TheoryLoader.hs), which never reaches
+/// `closeTranslatedTheory` and its `traceM` marker.
 const EXPECTED_STDERR: &[&str] = &[
     "[Theory Replication] Theory loaded",
     "[Theory Replication] Theory translated",
@@ -156,11 +155,9 @@ const EXPECTED_SPTHY: &[&str] = &[
     "end",
 ];
 
-/// Oracle stdout for `-m=spthytyped`: variables renamed (`s` → `s.1`), and
-/// the recomputed `function:` items appended after the lemma in DESCENDING
-/// `UserDefinedSym` order (`Map.foldrWithKey` + append, Typing.hs:210,226).
-/// The three trailing spaces on each `function:` line are HS's
-/// `prettyTranslationElement` bytes.
+/// Oracle stdout for `-m=spthytyped`: variables renamed (`s` → `s.1`).
+/// Default typing items are omitted because the signature already declares
+/// the same functions.
 const EXPECTED_SPTHYTYPED: &[&str] = &[
     "theory Replication",
     "",
@@ -184,12 +181,6 @@ const EXPECTED_SPTHYTYPED: &[&str] = &[
     "\"\u{2203} #i #j x y. (Secret( x ) @ #i) \u{2227} (Secret( y ) @ #j) \u{2227} \u{ac}(x = y)\"",
     "*/",
     "by sorry",
-    "",
-    "function: snd (Any) : Any   ",
-    "",
-    "function: pair (Any, Any) : Any   ",
-    "",
-    "function: fst (Any) : Any   ",
     "",
     "/* All wellformedness checks were successful. */",
     "",
@@ -275,8 +266,8 @@ const EXPECTED_MSR: &[&str] = &[
 ];
 
 /// Oracle stdout for `-m=spthy` on [`PATTERNS`].  The `process:` block goes
-/// through `prettyProcess = prettySapic' rulePrinter` (TheoryObject.hs:851-852,
-/// Print.hs:34-53), which re-applies `unextractMatchingVariables mv` to an
+/// through `prettyProcess = prettySapic' rulePrinter` (TheoryObject.hs,
+/// Print.hs), which re-applies `unextractMatchingVariables mv` to an
 /// embedded MSR's PREMISES: `[ In( =z ) ]` keeps the `=` pattern-match marker,
 /// while the unmarked sibling rule stays `[ In( z ) ]`.
 const EXPECTED_PATTERNS_SPTHY: &[&str] = &[
@@ -328,12 +319,6 @@ const EXPECTED_PATTERNS_SPTHYTYPED: &[&str] = &[
     "   [ In( z.1 ) ] --> [ ];",
     "   [ In( =z.1 ) ] --> [ ]",
     "",
-    "function: snd (Any) : Any   ",
-    "",
-    "function: pair (Any, Any) : Any   ",
-    "",
-    "function: fst (Any) : Any   ",
-    "",
     "/* All wellformedness checks were successful. */",
     "",
     "/*",
@@ -367,8 +352,8 @@ end
 /// print WITHOUT `[destructor]` while `dec` keeps it: HS's `function`
 /// short-circuit for those two names returns `NoEqUser (f, kp')` — the
 /// EXISTING pair-projection symbol `(1, Public, Constructor, NotNDC)` — so the
-/// requested attributes never reach the `FunctionTypingInfo` item
-/// (Theory/Text/Parser/Signature.hs:217, printed by TheoryObject.hs:820-838).
+/// requested attributes never reach the signature
+/// (Theory/Text/Parser/Signature.hs).
 /// The signature echo agrees: `fst/1` and `snd/1` list no attributes there
 /// either, because the short-circuit also skips `addFunSym`.
 const EXPECTED_FST_SND_ATTRS_SPTHY: &[&str] = &[
@@ -384,14 +369,6 @@ const EXPECTED_FST_SND_ATTRS_SPTHY: &[&str] = &[
     "    dec(g(x.1), x.2) = x.1,",
     "    fst(<x.1, x.2>) = x.1,",
     "    snd(<x.1, x.2>) = x.2",
-    "",
-    "function: fst (Any) : Any   ",
-    "",
-    "function: snd (Any) : Any   ",
-    "",
-    "function: dec (Any, Any) : Any   [destructor] ",
-    "",
-    "function: g (Any) : Any  [private]  ",
     "",
     "rule (modulo E) R:",
     "   [ In( x ) ] --> [ Out( fst(x) ) ]",
@@ -443,7 +420,7 @@ fn spthytyped_module_keeps_msr_pattern_match_markers() {
 }
 
 /// The `process="..."` rule attribute uses the OTHER rule printer —
-/// `prettyRuleAttribute`'s local `f l a r rest _` (Theory/Model/Rule.hs:1324-1327) discards
+/// `prettyRuleAttribute`'s local `f l a r rest _` (Theory/Model/Rule.hs) discards
 /// the match-var set — so both embedded MSRs render their premise unmarked and
 /// the two attributes are byte-identical.  Pins that the `=`-marking fix is
 /// confined to the `prettySapic` path.
@@ -485,7 +462,7 @@ fn spthy_module_echoes_the_process_block() {
 }
 
 #[test]
-fn spthytyped_module_appends_function_type_lines() {
+fn spthytyped_module_omits_redundant_default_type_lines() {
     if !maude_available() {
         eprintln!("skipping: maude not on path");
         return;
@@ -566,7 +543,7 @@ fn proverif_module_errors_as_unported() {
 }
 
 /// `--parse-only -m msr` behaves as plain `--parse-only` (Batch.hs guard
-/// order :91-101): no maude banner, no wf/version comment blocks, no
+/// order): no maude banner, no wf/version comment blocks, no
 /// translation.
 #[test]
 fn parse_only_wins_over_output_module() {
@@ -618,7 +595,7 @@ fn output_file_gets_verbatim_doc_and_stdout_stays_empty() {
 
 /// `-o` with an empty value (bare `-o`, no `-O`): every file is processed
 /// (all six markers), then `die "Please specify a valid output
-/// file/directory"` — stderr, rc 1, stdout empty (Batch.hs:106-110).
+/// file/directory"` — stderr, rc 1, stdout empty (Batch.hs).
 #[test]
 fn empty_output_file_flag_dies_after_processing() {
     if !maude_available() {
@@ -635,7 +612,7 @@ fn empty_output_file_flag_dies_after_processing() {
 }
 
 /// `--quit-on-warning` in translate mode (`withVersionAndReport`,
-/// TheoryLoader.hs:656 + `handleError (WarningError …)`, Batch.hs:236-242):
+/// TheoryLoader.hs + `handleError (WarningError …)`, Batch.hs):
 /// stdout = blank line + WARNING header + blank + report + blank, stderr ends
 /// with the `die` line, rc 1, NO theory output.
 #[test]

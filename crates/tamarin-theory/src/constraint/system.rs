@@ -1,6 +1,5 @@
-// Currently GPL 3.0 until granted permission by the upstream authors
-// of the tamarin-prover sources this file cites; list them with:
-//   scripts/gen_license_headers.py --authors <this file>
+// Currently GPL 3.0; see README.md for licensing details.
+// Derived from the upstream tamarin-prover sources referenced below.
 
 //! The `System` sequent — the solver's working state.
 //!
@@ -18,6 +17,7 @@ use crate::constraint::constraints::{Edge, Goal, LessAtom, NodeId};
 use crate::guarded::Guarded;
 use crate::rule::RuleACInst;
 use crate::tools::{EquationStore, SubtermStore};
+use tamarin_term::lterm::{HasFrees, LVar};
 
 // The pure `System` serializers, mirroring the Haskell children of
 // `Theory.Constraint.System`:
@@ -46,17 +46,16 @@ pub mod json;
 /// hoisted result is identical to rebuilding the adjacency on every query.
 #[derive(Debug, Clone, Default)]
 pub struct PrebuiltAdj {
-    adj: std::collections::BTreeMap<NodeId, Vec<NodeId>>,
+    adj: tamarin_utils::FastMap<NodeId, Vec<NodeId>>,
 }
 
 impl PrebuiltAdj {
     /// The inner `rawLessRel` adjacency (`from -> [to]` successor lists).
     /// Consumers that walk the relation directly (rather than through the
-    /// `always_before_with` BFS) take this `&BTreeMap` so a single build
-    /// feeds both query styles. The map is identical to the standalone
-    /// `rawLessRel` builders — same insertion sequence (less_atoms, edges,
-    /// unsolved Chain goals) into the same container.
-    pub(crate) fn map(&self) -> &std::collections::BTreeMap<NodeId, Vec<NodeId>> {
+    /// `always_before_with` BFS) take this map so a single build
+    /// feeds both query styles. It stores the same relation and preserves
+    /// each node's successor order: less atoms, edges, then unsolved chains.
+    pub(crate) fn map(&self) -> &tamarin_utils::FastMap<NodeId, Vec<NodeId>> {
         &self.adj
     }
 }
@@ -98,66 +97,6 @@ pub enum Side {
 }
 
 // =============================================================================
-// Write-sealed equation-store field
-// =============================================================================
-
-/// Write-sealed newtype around the system's equation-store `Arc`.
-///
-/// The `eq_store` field of [`SystemContent`] stays `pub` so every READ site
-/// keeps compiling unchanged — `sys.eq_store.subst` (double-deref
-/// `SealedEqStore` → `Arc<EquationStore>` → `EquationStore`),
-/// `Arc::ptr_eq(&a.eq_store, …)` (deref-coercion `&SealedEqStore` →
-/// `&Arc<EquationStore>`), etc. — via the `Deref<Target = Arc<EquationStore>>`
-/// below.
-///
-/// But it cannot be WRITTEN outside this module: the tuple field is private
-/// and the wrapper implements **no** `Default`, `Clone`, `DerefMut`, or public
-/// constructor, so a `SealedEqStore` VALUE cannot be produced anywhere except
-/// `system.rs`.  That closes the residual subst-stamp hole at COMPILE time:
-/// the escape-hatch `content_mut_untracked()` hands out `&mut SystemContent`
-/// with the `pub eq_store` field visible, but `c.eq_store = …` has no
-/// expressible right-hand side (no value to assign, no `mem::take`/`replace`
-/// target, no struct-literal field), so the only reachable write path is
-/// `System::set_eq_store` / `take_eq_store` / `eq_store_mut`, each of which
-/// bumps `subst_stamp`.
-///
-/// `Debug`/`PartialEq` are implemented manually, delegating to the inner
-/// `Arc`, so `SystemContent`'s derived `Debug`/`PartialEq` behave exactly as
-/// they would over a bare `Arc<EquationStore>` field.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(transparent)
-)]
-pub struct SealedEqStore(Arc<EquationStore>);
-
-impl std::ops::Deref for SealedEqStore {
-    type Target = Arc<EquationStore>;
-    #[inline]
-    fn deref(&self) -> &Arc<EquationStore> {
-        &self.0
-    }
-}
-
-// Delegate to the inner `Arc` so `{:?}` output (and any Debug-derived
-// serialisation) is identical to that of a bare `Arc<EquationStore>` field.
-impl std::fmt::Debug for SealedEqStore {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
-    }
-}
-
-// Content comparison (forwards to `Arc`'s `PartialEq`, i.e. the inner
-// `EquationStore` value), preserving goal/case dedup equality semantics.
-impl PartialEq for SealedEqStore {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-// =============================================================================
 // System
 // =============================================================================
 
@@ -172,15 +111,12 @@ impl PartialEq for SealedEqStore {
 /// hatch).  A raw write that forgets the stamp/cache bookkeeping no
 /// longer type-checks — that is the enforcement pivot for the
 /// verified-identity `subst_system` skip.
-// `Default` and `Clone` are IMPL'D MANUALLY (below), not derived: the
-// `eq_store` field is a `SealedEqStore`, which deliberately implements neither
-// `Default` nor `Clone` (that is what makes an out-of-module `SealedEqStore`
-// value unproducible → the write-seal).  The manual impls rebuild the field
-// through the module-private tuple constructor, so their behaviour is
-// byte-identical to the derived versions (an `Arc` refcount bump / a fresh
-// default `Arc`).  `Debug`/`PartialEq` are still derived (the wrapper provides
-// both, delegating to the inner `Arc`).
-#[derive(Debug, PartialEq)]
+/// The fields of HS `System` (System.hs) plus the port's own
+/// `Arc` wrappers, in a different order from HS's declaration.  Only equality
+/// is derived here, which is order-insensitive; HS's ordering chain is spelled
+/// out by `compare_systems_up_to_new_vars`, so no order may be derived on this
+/// struct.
+#[derive(Debug, Default, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SystemContent {
     /// Node id → rule instance providing its conclusion.
@@ -225,11 +161,9 @@ pub struct SystemContent {
     /// `Arc`-wrapped for copy-on-write structural sharing (see `nodes`).
     /// Cloned at every proof fork; mutated through `eq_store_mut`.
     ///
-    /// Write-sealed via [`SealedEqStore`]: reads deref through unchanged; the
-    /// only write path is `set_eq_store`/`take_eq_store`/`eq_store_mut` (each
-    /// bumps `subst_stamp`) because no `SealedEqStore` value is constructible
-    /// outside this module.
-    pub eq_store: SealedEqStore,
+    /// Private so writes must use `set_eq_store`, `take_eq_store`, or
+    /// `eq_store_mut`, which maintain `subst_stamp`.
+    eq_store: Arc<EquationStore>,
     /// Subterm store.
     ///
     /// `Arc`-wrapped for copy-on-write structural sharing (see `nodes`).
@@ -242,48 +176,45 @@ pub struct SystemContent {
     pub goals: Arc<Vec<(Goal, GoalStatus)>>,
 }
 
-// Manual `Default` — the derived one is unavailable because `SealedEqStore`
-// has no `Default` (part of the write-seal).  Rebuilds `eq_store` through the
-// module-private constructor with a default `Arc<EquationStore>`; every other
-// field takes its own `Default`, so the result is byte-identical to a derive.
-impl Default for SystemContent {
-    fn default() -> Self {
-        Self {
-            nodes: Arc::default(),
-            edges: Vec::default(),
-            less_atoms: Vec::default(),
-            formulas: Vec::default(),
-            solved_formulas: Vec::default(),
-            lemmas: Vec::default(),
-            last_atom: None,
-            eq_store: SealedEqStore(Arc::default()),
-            subterm_store: Arc::default(),
-            goals: Arc::default(),
-        }
-    }
-}
-
-// Manual `Clone` — the derived one is unavailable because `SealedEqStore` has
-// no `Clone` (part of the write-seal; `.clone()` on the field falls through
-// `Deref` to `Arc::clone`, yielding `Arc<EquationStore>`, not another sealed
-// value — so a clone can never be assigned back into an `eq_store` slot).
-// Every field clones exactly as the derive would (`Arc` refcount bumps for the
-// shared collections, `eq_store` rebuilt through the private constructor from
-// an `Arc::clone`).  Byte-identical to a derived `Clone`.
-impl Clone for SystemContent {
-    fn clone(&self) -> Self {
-        Self {
-            nodes: self.nodes.clone(),
-            edges: self.edges.clone(),
-            less_atoms: self.less_atoms.clone(),
-            formulas: self.formulas.clone(),
-            solved_formulas: self.solved_formulas.clone(),
-            lemmas: self.lemmas.clone(),
-            last_atom: self.last_atom,
-            eq_store: SealedEqStore(self.eq_store.0.clone()),
-            subterm_store: self.subterm_store.clone(),
-            goals: self.goals.clone(),
-        }
+impl SystemContent {
+    /// Compare the fields following `nodes` in Haskell's `System` declaration
+    /// order. The exhaustive destructures make additions fail to compile until
+    /// their ordering role is decided.
+    pub(crate) fn compare_hs_fields_after_nodes(&self, other: &Self) -> std::cmp::Ordering {
+        let Self {
+            nodes: _,
+            edges,
+            less_atoms,
+            formulas,
+            solved_formulas,
+            lemmas,
+            last_atom,
+            eq_store,
+            subterm_store,
+            goals,
+        } = self;
+        let Self {
+            nodes: _,
+            edges: other_edges,
+            less_atoms: other_less_atoms,
+            formulas: other_formulas,
+            solved_formulas: other_solved_formulas,
+            lemmas: other_lemmas,
+            last_atom: other_last_atom,
+            eq_store: other_eq_store,
+            subterm_store: other_subterm_store,
+            goals: other_goals,
+        } = other;
+        edges
+            .cmp(other_edges)
+            .then_with(|| less_atoms.cmp(other_less_atoms))
+            .then_with(|| last_atom.cmp(other_last_atom))
+            .then_with(|| subterm_store.cmp_hs(other_subterm_store))
+            .then_with(|| eq_store.cmp(other_eq_store))
+            .then_with(|| formulas.cmp(other_formulas))
+            .then_with(|| solved_formulas.cmp(other_solved_formulas))
+            .then_with(|| lemmas.cmp(other_lemmas))
+            .then_with(|| goals.cmp(other_goals))
     }
 }
 
@@ -373,34 +304,11 @@ pub struct System {
     pub source_kind: Option<SourceKind>,
     pub side: Option<Side>,
     /// Monotonic goal-number counter (`_sNextGoalNr`,
-    /// System.hs:383-401, see line 394).  Advanced on every goal insertion (even when
+    /// System.hs).  Advanced on every goal insertion (even when
     /// the goal already exists — HS's `insertGoalStatus`
-    /// Reduction.hs:516-521 always `succ`s it).  Each new goal records
+    /// Reduction.hs always `succ`s it).  Each new goal records
     /// the current value as its `GoalStatus.nr`.
     pub next_goal_nr: u64,
-    /// Source-case names already grafted into this branch.  Mirrors
-    /// Haskell's `filterCases` invariant in `solveAllSafeGoals`: once
-    /// a precomputed case has been used to discharge a goal, it is
-    /// removed from the available source list for the remainder of
-    /// the search branch.  Without this, a chain-saturated case whose
-    /// internal KU goals re-spawn at runtime will pick the same case
-    /// again, looping until depth-limit.
-    pub used_sources: Vec<String>,
-    /// Provenance tracking: universals in `lemmas` that
-    /// came from `[sources]`-tagged lemma bodies.  Haskell never adds
-    /// these to `sLemmas` (only `[reuse]` lemmas go there via
-    /// `gatherReusableLemmas`), so its runtime `insertImpliedFormulas`
-    /// never fires them — they're only consulted via
-    /// `refineWithSourceAsms` at precompute.  We add them to `lemmas`
-    /// as a workaround for our weaker refine; tagging them here lets
-    /// `insertImpliedFormulas` skip them at runtime (when
-    /// `!in_precompute_mode`) while still firing them during refine's
-    /// Step 1 simplify (where it's needed to drop typing-violating
-    /// cases).  Matching Haskell's runtime behaviour eliminates the
-    /// spurious `case case_1`/`case case_2` Disj-decomposition steps
-    /// that appear in our proof trees for ~10 corpus lemmas.
-    /// Per-element `Arc` — see `formulas`.
-    pub sources_lemma_universals: Vec<Arc<Guarded>>,
     /// Cached max free-var idx across the system.  `None` means
     /// "invalid — lazily recompute on next `bounds_max` call".
     /// Maintained incrementally on additive mutations and
@@ -432,8 +340,8 @@ pub struct System {
     /// cache-maintenance chokepoints the max-var-idx cache already funnels
     /// every content mutation through (see `bump_content_stamp`).  Powers the
     /// verified-identity `subst_system` skip (reduction.rs).  Excluded from
-    /// `PartialEq` / serialized keys / `compute_compare_systems_key` exactly
-    /// like the cache Cells.  `Cell` so read-path bump helpers need no `&mut`.
+    /// `PartialEq` and from the case-dedup comparison exactly like the cache
+    /// Cells.  `Cell` so read-path bump helpers need no `&mut`.
     /// Private: all access goes through the stamp/marker methods below.
     content_stamp: Cell<u64>,
     /// Value-version of `eq_store.subst`.  Fresh `next_stamp()` on every subst
@@ -506,8 +414,6 @@ impl Clone for System {
             source_kind,
             side,
             next_goal_nr,
-            used_sources,
-            sources_lemma_universals,
             max_var_idx_cache,
             node_max_cache,
             content_stamp,
@@ -523,8 +429,6 @@ impl Clone for System {
             source_kind: *source_kind,
             side: *side,
             next_goal_nr: *next_goal_nr,
-            used_sources: used_sources.clone(),
-            sources_lemma_universals: sources_lemma_universals.clone(),
             // The cache/stamp Cells are COPIED verbatim (NOT invalidated): a
             // clone is content-identical to its parent, so it inherits both
             // stamps AND the marker — if the parent had a verified no-op
@@ -551,6 +455,78 @@ impl Clone for System {
     }
 }
 
+/// The fields of a [`System`] that its canonical form covers
+/// (`canon_term_graph::system_to_term`), and nothing else: two systems are
+/// alpha-AC equal iff these are. A field left out of the form merges systems
+/// that differ in it, so [`System::canon_fields`] decides every field
+/// explicitly.
+pub(crate) struct CanonFields<'a> {
+    pub(crate) nodes: &'a [(NodeId, RuleACInst)],
+    pub(crate) edges: &'a [Edge],
+    pub(crate) less_atoms: &'a [LessAtom],
+    pub(crate) last_atom: Option<NodeId>,
+    pub(crate) formulas: &'a [Arc<Guarded>],
+    pub(crate) solved_formulas: &'a [Arc<Guarded>],
+    pub(crate) lemmas: &'a [Arc<Guarded>],
+    pub(crate) eq_store: &'a EquationStore,
+    pub(crate) subterm_store: &'a SubtermStore,
+    pub(crate) goals: &'a [(Goal, GoalStatus)],
+    pub(crate) source_kind: Option<SourceKind>,
+    pub(crate) side: Option<Side>,
+}
+
+impl System {
+    /// [`CanonFields`] of `self`. The destructuring is exhaustive (no `..`):
+    /// a new `System` or `SystemContent` field is a compile error here until
+    /// it is either covered or excluded with a reason (and a row in PLAN.md's
+    /// field audit).
+    pub(crate) fn canon_fields(&self) -> CanonFields<'_> {
+        let System {
+            content:
+                SystemContent {
+                    nodes,
+                    edges,
+                    less_atoms,
+                    formulas,
+                    solved_formulas,
+                    lemmas,
+                    last_atom,
+                    eq_store,
+                    subterm_store,
+                    goals,
+                },
+            source_kind,
+            side,
+            // A path-dependent allocation counter.
+            next_goal_nr: _,
+            // Caches and stamps, excluded from `System`'s `PartialEq` too.
+            max_var_idx_cache: _,
+            node_max_cache: _,
+            content_stamp: _,
+            subst_stamp: _,
+            subst_applied_marker: _,
+            formulas_stamp: _,
+            solved_formulas_stamp: _,
+            formulas_canon_cache: _,
+            solved_formulas_canon_cache: _,
+        } = self;
+        CanonFields {
+            nodes,
+            edges,
+            less_atoms,
+            last_atom: *last_atom,
+            formulas,
+            solved_formulas,
+            lemmas,
+            eq_store,
+            subterm_store,
+            goals,
+            source_kind: *source_kind,
+            side: *side,
+        }
+    }
+}
+
 // Manual `PartialEq` — ignores the cache.  Two systems with identical
 // content but different cache state (e.g. one freshly cloned, one
 // after `bounds_max` populated its cache) must compare equal — see
@@ -566,8 +542,6 @@ impl PartialEq for System {
             source_kind,
             side,
             next_goal_nr,
-            used_sources,
-            sources_lemma_universals,
             // DELIBERATELY excluded from equality: two systems with identical
             // content but different cache/stamp state (e.g. one freshly cloned,
             // one after `bounds_max` populated its cache) must compare equal —
@@ -590,14 +564,12 @@ impl PartialEq for System {
             && *side == other.side
             && *content == other.content
             && *next_goal_nr == other.next_goal_nr
-            && *used_sources == other.used_sources
-            && *sources_lemma_universals == other.sources_lemma_universals
     }
 }
 
 /// Read access to the [`SystemContent`] fields.  Field reads auto-deref
-/// through the `.` operator, so `sys.nodes`, `sys.eq_store.subst`, … keep
-/// compiling unchanged both cross-module and inside `impl System`.
+/// through the `.` operator, so ordinary reads such as `sys.nodes` remain
+/// direct. The private equation store uses [`System::eq_store`].
 ///
 /// There is DELIBERATELY no `DerefMut`: this is a "smart field container",
 /// not a pointer.  Every write must go through a stamp/cache-maintaining
@@ -613,28 +585,7 @@ impl std::ops::Deref for System {
     }
 }
 
-/// The comparison key `add_goal_with_loop_flag` (and `reduction.rs`'s goal
-/// scans) dedup goals by — the seam where a Disj canonicalisation would go.
-///
-/// It is the IDENTITY: `normalize_bound_lvars` (guarded.rs) is a pure
-/// `g.clone()` and `Disj::new` is a plain wrapper (no reorder/dedup), so a
-/// `Disj` arm would rebuild a goal that is `==` the original.  Under
-/// `Goal: PartialEq`, `canonical_goal_for_dedup(a) == canonical_goal_for_dedup(b)`
-/// is therefore exactly `a == b`.  It borrows rather than clones, so the
-/// goal-insertion hot path allocates nothing; every caller uses the result
-/// only for an `==` comparison — the ORIGINAL goal is what gets stored.
-///
-/// IF `normalize_bound_lvars` ever becomes non-identity: give `Disj` an owned
-/// arm here, i.e.
-///     let canon_alts = d.0.iter().map(crate::guarded::normalize_bound_lvars).collect();
-///     std::borrow::Cow::Owned(Goal::Disj(crate::constraint::constraints::Disj::new(canon_alts)))
-/// so alpha-equivalent Disjs re-fired with different freshen-shifted bound
-/// idxs collapse the way HS's DeBruijn-bound Map key does.
-pub fn canonical_goal_for_dedup(g: &Goal) -> std::borrow::Cow<'_, Goal> {
-    std::borrow::Cow::Borrowed(g)
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GoalStatus {
     /// Whether the goal is currently "loop-marked".
@@ -642,32 +593,32 @@ pub struct GoalStatus {
     /// Whether the goal is already solved (kept for replay).
     pub solved: bool,
     /// Goal creation order (`_gsNr` in HS `GoalStatus`,
-    /// System.hs:369-380, see line 372).  Assigned from `System.next_goal_nr` at first
+    /// System.hs).  Assigned from `System.next_goal_nr` at first
     /// insertion; on re-insertion of an existing goal HS keeps the
     /// `min` (so the original, smaller nr wins — see
-    /// `combineGoalStatus`).  `goalNrRanking` (ProofMethod.hs:592-593
+    /// `combineGoalStatus`).  `goalNrRanking` (ProofMethod.hs
     /// `sortOn (fst . snd)`) orders goals by this number, NOT by Vec
     /// position.  This is the canonical tie-break within a heuristic
     /// priority class.
     pub nr: u64,
 }
 
-// --- Cached debug env flags for the goal insertion hot path -------
-// `add_goal`/`add_goal_with_loop_flag` insert goals per KU-decomposition /
-// conjoinSystem.  These diagnostic env vars are constant for the
-// process, so each accessor caches its presence via `env_gate!` instead
-// of an env-lock + `String` alloc per insertion.
-#[inline]
-fn dbg_insert_goal() -> bool {
-    tamarin_utils::env_gate!("TAM_RS_DBG_INSERT_GOAL")
+impl PartialOrd for GoalStatus {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
-#[inline]
-fn dbg_insert_goal_include_precompute() -> bool {
-    tamarin_utils::env_gate!("TAM_RS_DBG_INSERT_GOAL_INCLUDE_PRECOMPUTE")
-}
-#[inline]
-fn trace_goal_insert() -> bool {
-    tamarin_utils::env_gate!("TAM_RS_TRACE_GOAL_INSERT")
+
+/// HS derives `Ord GoalStatus` over `_gsSolved`, `_gsNr`, `_gsLoopBreaker`
+/// (System.hs).  The port declares `looping` first, so the order is
+/// written out here instead of derived.
+impl Ord for GoalStatus {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.solved
+            .cmp(&other.solved)
+            .then_with(|| self.nr.cmp(&other.nr))
+            .then_with(|| self.looping.cmp(&other.looping))
+    }
 }
 
 // =============================================================================
@@ -678,22 +629,27 @@ fn trace_goal_insert() -> bool {
 ///
 /// THE INVARIANT, stated once for all the order helpers: `sNodes` is an
 /// `M.Map NodeId RuleACInst` and `sEdges` / `sLessAtoms` are `Data.Set`s
-/// (System.hs:383-385), so every HS pass that walks them — through `M.toList`,
+/// (System.hs), `sFormulas` / `sSolvedFormulas` / `sLemmas` are
+/// `S.Set LNGuarded` and `sGoals` is an `M.Map Goal GoalStatus`
+/// (System.hs), so every HS pass that walks them — through `M.toList`,
 /// `M.elems` or `S.toList` — sees them in ascending key/element order.  RS
-/// stores all three as `Vec`s in INSERTION order, which carries no map/set
+/// stores all six as `Vec`s in INSERTION order, which carries no map/set
 /// semantics: `Reduction::set_nodes` keeps first-occurrence order because that
 /// is what decides which rule survives an id collision, and the display-only
 /// `compress_system` pass ([`mod@graph::simplify`]) appends its
 /// reconnected edges / less-atoms instead of re-inserting them in order.  A
 /// port site that needs the HS order therefore has to materialise it at the
-/// `M.toList` / `S.toList` boundary — through this function or through
-/// [`System::nodes_in_map_order`], [`System::edges_in_set_order`],
-/// [`System::less_atoms_in_set_order`].
+/// `M.toList` / `S.toList` boundary — through this function, through
+/// [`formulas_in_set_order`], or through [`System::nodes_in_map_order`],
+/// [`System::edges_in_set_order`], [`System::less_atoms_in_set_order`],
+/// [`System::goals_in_map_order`].
 ///
 /// The orders are the HS instances: `Ord NodeId` is `Ord LVar` = idx, then
-/// sort, then name (LTerm.hs:546-548); `Edge`'s derived `Ord` is `src` then
-/// `tgt` (Constraints.hs:79-83); `LessAtom`'s manual `Ord` is
-/// `(smaller, larger)`, ignoring the reason tag (Constraints.hs:126-130).
+/// sort, then name (LTerm.hs); `Edge`'s derived `Ord` is `src` then
+/// `tgt` (Constraints.hs); `LessAtom`'s manual `Ord` is
+/// `(smaller, larger)`, ignoring the reason tag (Constraints.hs);
+/// `Ord Guarded` is derived (Guarded.hs); `Ord Goal` is derived
+/// (Constraints.hs), mirrored by [`Goal`]'s own derive.
 ///
 /// Takes a slice rather than a `&System` so a call site holding only
 /// `&[(NodeId, RuleACInst)]` shares this one implementation.
@@ -703,9 +659,21 @@ pub fn nodes_in_map_order(nodes: &[(NodeId, RuleACInst)]) -> Vec<&(NodeId, RuleA
     ordered
 }
 
+/// One `S.Set LNGuarded` formula store in `S.toList` order — see
+/// [`nodes_in_map_order`] for the map/set-order invariant these helpers
+/// materialise.
+///
+/// Takes a slice so that `sFormulas`, `sSolvedFormulas` and `sLemmas` share
+/// this one implementation.
+pub(crate) fn formulas_in_set_order(formulas: &[Arc<Guarded>]) -> Vec<&Guarded> {
+    let mut ordered: Vec<&Guarded> = formulas.iter().map(|f| f.as_ref()).collect();
+    ordered.sort();
+    ordered
+}
+
 /// [`System::node_rule_map`]'s return: a read-only `NodeId → &RuleACInst`
 /// index into a system's nodes, standing in for HS's `M.lookup v sNodes`
-/// (System.hs:927/931) wherever a caller resolves more than one node.
+/// (System.hs) wherever a caller resolves more than one node.
 pub type NodeRuleMap<'a> = tamarin_utils::FastMap<&'a NodeId, &'a RuleACInst>;
 
 impl System {
@@ -815,42 +783,27 @@ impl System {
         *self.solved_formulas_canon_cache.borrow_mut() = None;
     }
 
-    /// Install a new equation store, bumping `subst_stamp`.  The ONLY
-    /// sanctioned path for `self.eq_store = Arc::new(..)` reassignment — the
-    /// `eq_store_direct_assignment_is_routed` guard test fails the build on any
-    /// raw `.eq_store =` write in the solver that bypasses this.
+    /// Install a new equation store, bumping `subst_stamp`. The private field
+    /// makes this the only whole-store assignment path.
     #[inline]
     pub fn set_eq_store(&mut self, es: Arc<EquationStore>) {
-        // `TAM_DBG_EQ_FALSE_WIPE=1`: a false (mzero-marked) store being
-        // replaced by a non-false one resurrects a dead case — print the
-        // installing call chain (RUST_BACKTRACE=1 for symbols).
-        if tamarin_utils::env_gate!("TAM_DBG_EQ_FALSE_WIPE")
-            && self.content.eq_store.0.is_false()
-            && !es.is_false()
-        {
-            eprintln!(
-                "[EQ_FALSE_WIPE] set_eq_store false->ok\n{}",
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
-        // Module-private `SealedEqStore` constructor: the only place (with
-        // `take_eq_store`/`eq_store_mut`) a sealed value is produced.
-        self.content.eq_store = SealedEqStore(es);
+        self.content.eq_store = es;
         self.bump_subst_stamp();
     }
 
+    /// Read the equation store without exposing a writable field.
+    #[inline]
+    pub fn eq_store(&self) -> &EquationStore {
+        &self.content.eq_store
+    }
+
     /// Take the `eq_store` `Arc` out (leaving a `Default` in its place),
-    /// bumping `subst_stamp`.  Sole sanctioned `mem::take(&mut …eq_store)`
-    /// door for the "unwrap → rebuild → `set_eq_store`" pattern; the
-    /// `eq_store_installs_route_through_set_eq_store` guard test forbids a raw
-    /// `mem::take(&mut sys.eq_store)` elsewhere (the take is a subst mutation).
+    /// bumping `subst_stamp`. This supports the "unwrap → rebuild →
+    /// `set_eq_store`" pattern without exposing the field.
     #[inline]
     pub fn take_eq_store(&mut self) -> Arc<EquationStore> {
         self.bump_subst_stamp();
-        // `SealedEqStore` has no `Default`, so `mem::take` is unavailable (by
-        // design — that unavailability is what seals the field).  Swap in a
-        // freshly-constructed default sealed store and unwrap the taken value.
-        std::mem::replace(&mut self.content.eq_store, SealedEqStore(Arc::default())).0
+        std::mem::take(&mut self.content.eq_store)
     }
 
     // ====== content-write choke doors (the enforcement surface) ======
@@ -891,9 +844,8 @@ impl System {
     /// The closed set of callers is pinned by the
     /// `content_untracked_callers_are_enumerated` guard test.  A new call site
     /// fails the build until its stamp reasoning is established.  The
-    /// subst axis is sealed independently of this list: the `eq_store` field
-    /// this door exposes is a `SealedEqStore`, so a raw assignment has no
-    /// expressible right-hand side and every write path bumps `subst_stamp`.
+    /// subst axis is sealed independently: `eq_store` is private, so every
+    /// write path bumps `subst_stamp`.
     ///
     /// VISIBILITY: `pub(crate)`, not `pub` — unnameable from `tamarin-server`
     /// and any other downstream crate (only the tracked `content_mut` door is
@@ -928,6 +880,132 @@ impl System {
         self.bump_content_stamp();
         self.bump_solved_formulas_stamp();
         &mut self.content.solved_formulas
+    }
+
+    /// Normalize and insert an open formula unless either formula store
+    /// already contains it. Returns whether the store changed.
+    pub fn insert_formula(&mut self, formula: impl Into<Arc<Guarded>>) -> bool {
+        let formula = Self::normalize_formula(formula.into());
+        if crate::guarded::stores_contains(&self.content.solved_formulas, &formula) {
+            return false;
+        }
+        self.insert_open_formula_normalized(formula)
+    }
+
+    /// Normalize and insert into the open store regardless of solved-store
+    /// membership. This is the direct set-write operation used when Haskell
+    /// updates the two stores independently.
+    pub fn insert_open_formula(&mut self, formula: impl Into<Arc<Guarded>>) -> bool {
+        let formula = Self::normalize_formula(formula.into());
+        self.insert_open_formula_normalized(formula)
+    }
+
+    fn insert_open_formula_normalized(&mut self, formula: Arc<Guarded>) -> bool {
+        if crate::guarded::stores_contains(&self.content.formulas, &formula) {
+            return false;
+        }
+        self.bump_cache_guarded(&formula);
+        self.formulas_mut().push(formula);
+        true
+    }
+
+    /// Append an already-normalized formula whose absence from both stores
+    /// was established by the caller.
+    pub(crate) fn push_open_formula_normalized_absent(&mut self, formula: impl Into<Arc<Guarded>>) {
+        let formula = formula.into();
+        debug_assert!(!crate::guarded::stores_contains(
+            &self.content.formulas,
+            &formula
+        ));
+        debug_assert!(!crate::guarded::stores_contains(
+            &self.content.solved_formulas,
+            &formula
+        ));
+        self.bump_cache_guarded(&formula);
+        self.formulas_mut().push(formula);
+    }
+
+    /// Normalize and insert a solved formula unless it is already solved.
+    /// Open-store membership is deliberately independent: callers moving a
+    /// formula between stores remove the open entry first, while set joins may
+    /// preserve membership in both stores.
+    pub fn insert_solved_formula(&mut self, formula: impl Into<Arc<Guarded>>) -> bool {
+        let formula = Self::normalize_formula(formula.into());
+        if crate::guarded::stores_contains(&self.content.solved_formulas, &formula) {
+            return false;
+        }
+        self.bump_cache_guarded(&formula);
+        self.solved_formulas_mut().push(formula);
+        true
+    }
+
+    /// Append an already-normalized solved formula after a caller-owned
+    /// membership check.
+    pub(crate) fn push_solved_formula_normalized_absent(
+        &mut self,
+        formula: impl Into<Arc<Guarded>>,
+    ) {
+        let formula = formula.into();
+        debug_assert!(!crate::guarded::stores_contains(
+            &self.content.solved_formulas,
+            &formula
+        ));
+        self.bump_cache_guarded(&formula);
+        self.solved_formulas_mut().push(formula);
+    }
+
+    fn normalize_formula(formula: Arc<Guarded>) -> Arc<Guarded> {
+        match crate::guarded::normalise_stored_formula_cow(&formula) {
+            Some(normalized) => Arc::new(normalized),
+            None => formula,
+        }
+    }
+
+    /// Clear the open formula store, including every cache/stamp update the
+    /// removal requires.
+    pub fn clear_formulas(&mut self) {
+        if !self.content.formulas.is_empty() {
+            self.invalidate_max_var_idx_cache();
+            self.formulas_mut().clear();
+        }
+    }
+
+    /// Clear both formula stores through their tracked write doors.
+    pub fn clear_formula_stores(&mut self) {
+        self.clear_formulas();
+        if !self.content.solved_formulas.is_empty() {
+            self.invalidate_max_var_idx_cache();
+            self.solved_formulas_mut().clear();
+        }
+    }
+
+    /// Apply the equation-store substitution to less-atom endpoints. The
+    /// fields are borrowed together here so no raw `SystemContent` reference
+    /// has to escape through the untracked solver door.
+    pub(crate) fn normalise_less_atoms(&mut self) -> bool {
+        if self.content.eq_store.subst.is_empty() {
+            return false;
+        }
+        let content = &mut self.content;
+        let subst = &content.eq_store.subst;
+        let mut changed = false;
+        let normalize = |id: &NodeId| match subst.image_of(id) {
+            Some(tamarin_term::term::Term::Lit(tamarin_term::vterm::Lit::Var(var))) => *var,
+            _ => *id,
+        };
+        for atom in &mut content.less_atoms {
+            let smaller = normalize(&atom.smaller);
+            let larger = normalize(&atom.larger);
+            changed |= smaller != atom.smaller || larger != atom.larger;
+            atom.smaller = smaller;
+            atom.larger = larger;
+        }
+        if changed {
+            // Substitution cannot increase the cached maximum here, but the
+            // content stamp must invalidate a stale simplification marker.
+            self.bump_content_stamp();
+        }
+        changed
     }
 
     /// Bump `formulas_stamp` ONLY (NOT `content_stamp`) and hand out
@@ -1021,7 +1099,7 @@ impl System {
         if stats {
             use std::sync::atomic::Ordering::Relaxed;
             let calls = CANON_CALLS.fetch_add(1, Relaxed) + 1;
-            if calls % 20_000 == 0 {
+            if calls.is_multiple_of(20_000) {
                 let hits = CANON_HITS.load(Relaxed);
                 let incr = CANON_INCR.load(Relaxed);
                 let reused = CANON_ENTRY_REUSED.load(Relaxed);
@@ -1046,26 +1124,26 @@ impl System {
         // Snapshot the current cached generation (an `Arc` clone) so the
         // `RefCell` borrow ends before a rebuild borrows it mutably below.
         let current = slot.borrow().clone();
-        if let Some(cached) = &current {
-            if cached.stamp == stamp {
-                // Oracle: a stamp hit asserts the store is value/order-identical
-                // to the generation that built `cached`.  Rebuild from scratch
-                // and assert byte-equality — a mismatch means a `formulas`
-                // change did not mint a fresh stamp (an under-bumped write path).
-                if tamarin_utils::env_gate!("TAM_RS_VERIFY_CANON_TABLES") {
-                    let fresh = Self::build_canon_full(store, stamp, &canon);
-                    assert!(
-                        canon_entries_eq(&cached.entries, &fresh.entries),
-                        "TAM_RS_VERIFY_CANON_TABLES: cached canon table diverges \
+        if let Some(cached) = &current
+            && cached.stamp == stamp
+        {
+            // Oracle: a stamp hit asserts the store is value/order-identical
+            // to the generation that built `cached`.  Rebuild from scratch
+            // and assert byte-equality — a mismatch means a `formulas`
+            // change did not mint a fresh stamp (an under-bumped write path).
+            if tamarin_utils::env_gate!("TAM_RS_VERIFY_CANON_TABLES") {
+                let fresh = Self::build_canon_full(store, stamp, &canon);
+                assert!(
+                    canon_entries_eq(&cached.entries, &fresh.entries),
+                    "TAM_RS_VERIFY_CANON_TABLES: cached canon table diverges \
                          from a fresh rebuild at a matching stamp — a formula \
                          store write did not bump its per-store stamp"
-                    );
-                }
-                if stats {
-                    CANON_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return Arc::clone(cached);
+                );
             }
+            if stats {
+                CANON_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Arc::clone(cached);
         }
         if stats {
             CANON_INCR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1154,7 +1232,7 @@ impl System {
     }
 
     /// The rule instance at node `v`, if present. Port of HS `nodeRuleSafe`
-    /// (System.hs:911-913): `M.lookup v sNodes`.
+    /// (System.hs): `M.lookup v sNodes`.
     pub fn node_rule_safe(&self, v: &NodeId) -> Option<&RuleACInst> {
         self.nodes.iter().find(|(id, _)| id == v).map(|(_, r)| r)
     }
@@ -1192,9 +1270,50 @@ impl System {
         ordered
     }
 
+    /// `sGoals` in `M.toList` order, i.e. ascending `Ord Goal` — see
+    /// [`nodes_in_map_order`].
+    pub(crate) fn goals_in_map_order(&self) -> Vec<&(Goal, GoalStatus)> {
+        let mut ordered: Vec<&(Goal, GoalStatus)> = self.goals.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(&b.0));
+        ordered
+    }
+
+    /// Walk the free variables of every Haskell `System` field in record order.
+    /// `nodes_done` runs between `sNodes` and the remaining fields so
+    /// `rename_precise_system` can retain its node-only identity fast path.
+    pub(crate) fn for_each_free_with_node_boundary<S: ?Sized>(
+        &self,
+        state: &mut S,
+        mut visit: impl FnMut(&mut S, &LVar),
+        nodes_done: impl FnOnce(&mut S),
+    ) {
+        for (id, rule) in self.nodes_in_map_order() {
+            id.for_each_free(&mut |v| visit(state, v));
+            rule.for_each_free(&mut |v| visit(state, v));
+        }
+        nodes_done(state);
+        for e in self.edges_in_set_order() {
+            e.for_each_free(&mut |v| visit(state, v));
+        }
+        for la in self.less_atoms_in_set_order() {
+            la.for_each_free(&mut |v| visit(state, v));
+        }
+        self.last_atom.for_each_free(&mut |v| visit(state, v));
+        self.subterm_store.for_each_free(&mut |v| visit(state, v));
+        self.eq_store.for_each_free(&mut |v| visit(state, v));
+        for store in [&self.formulas, &self.solved_formulas, &self.lemmas] {
+            for g in formulas_in_set_order(store) {
+                g.for_each_free(&mut |v| visit(state, v));
+            }
+        }
+        for entry in self.goals_in_map_order() {
+            entry.for_each_free(&mut |v| visit(state, v));
+        }
+    }
+
     /// All `In`- and protocol-premise terms in the system, as
     /// `(node, premise, term-index, term)`. Port of HS `allPrems`
-    /// (System.hs:894-899).
+    /// (System.hs).
     ///
     /// ORDER: the node walk is `nodes` INSERTION order, where HS walks
     /// `M.toList sNodes` (ascending `NodeId`).  A caller whose output depends
@@ -1222,32 +1341,41 @@ impl System {
     }
 
     /// All unsolved destruction chains, as `(NodeConc, NodePrem)`. Port of HS
-    /// `unsolvedChains` (System.hs:1601-1605).
+    /// `unsolvedChains` (System.hs).
     ///
     /// ORDER: `goals` INSERTION order, where HS walks `M.toList sGoals`
     /// (ascending `Goal`).  A caller that needs the HS sequence sorts the
-    /// result — see `graph::repr::compute_basic_graph_repr`.
+    /// collected pairs — see `graph::repr::compute_basic_graph_repr`.
     pub fn unsolved_chains(
         &self,
-    ) -> Vec<(
-        crate::constraint::constraints::NodeConc,
-        crate::constraint::constraints::NodePrem,
-    )> {
+    ) -> impl Iterator<
+        Item = (
+            crate::constraint::constraints::NodeConc,
+            crate::constraint::constraints::NodePrem,
+        ),
+    > + '_ {
         use crate::constraint::constraints::Goal;
-        let mut out = Vec::new();
-        for (g, status) in self.goals.iter() {
-            if status.solved {
-                continue;
-            }
-            if let Goal::Chain(from, to) = g {
-                out.push((*from, *to));
-            }
-        }
-        out
+        self.goals.iter().filter_map(|(g, status)| match g {
+            Goal::Chain(from, to) if !status.solved => Some((*from, *to)),
+            _ => None,
+        })
+    }
+
+    /// All unsolved action atoms, as `(NodeId, &LNFact)`. Port of HS
+    /// `unsolvedActionAtoms` (System.hs).  Same insertion-order
+    /// caveat as [`unsolved_chains`](Self::unsolved_chains).
+    pub fn unsolved_action_atoms(
+        &self,
+    ) -> impl Iterator<Item = (NodeId, &crate::fact::LNFact)> + '_ {
+        use crate::constraint::constraints::Goal;
+        self.goals.iter().filter_map(|(g, status)| match g {
+            Goal::Action(i, fa) if !status.solved => Some((*i, fa)),
+            _ => None,
+        })
     }
 
     /// All unsolved premise goals, as `(NodePrem, LNFact)`. Port of HS
-    /// `unsolvedPremises` (System.hs:1505-1509).  Same insertion-order caveat
+    /// `unsolvedPremises` (System.hs).  Same insertion-order caveat
     /// as [`unsolved_chains`](Self::unsolved_chains).
     pub fn unsolved_premises(
         &self,
@@ -1273,7 +1401,7 @@ impl System {
     /// otherwise hands out a `&mut` to the existing storage.  Use this
     /// for any in-place mutation of the node list.
     #[inline]
-    pub fn nodes_mut(&mut self) -> &mut Vec<(NodeId, RuleACInst)> {
+    pub(crate) fn nodes_mut(&mut self) -> &mut Vec<(NodeId, RuleACInst)> {
         // Structural content-mutation choke: any `&mut` node access bumps
         // `content_stamp` (unconditional — `subst_system_once` reassigns
         // `self.sys.nodes` directly, never via `nodes_mut`, so this never
@@ -1282,9 +1410,21 @@ impl System {
         Arc::make_mut(&mut self.content.nodes)
     }
 
+    /// Mutate each stored rule while preserving the `System` cache contract.
+    /// Intended for presentation transforms in downstream crates, which need
+    /// to rewrite node payloads but must not receive unrestricted access to
+    /// the cache-sensitive node container.
+    pub fn for_each_node_rule_mut(&mut self, mut f: impl FnMut(&mut RuleACInst)) {
+        self.invalidate_max_var_idx_cache();
+        self.invalidate_node_max_cache();
+        for (_, rule) in self.nodes_mut() {
+            f(rule);
+        }
+    }
+
     /// Copy-on-write mutable access to `goals` (see `nodes_mut`).
     #[inline]
-    pub fn goals_mut(&mut self) -> &mut Vec<(Goal, GoalStatus)> {
+    pub(crate) fn goals_mut(&mut self) -> &mut Vec<(Goal, GoalStatus)> {
         Arc::make_mut(&mut self.content.goals)
     }
 
@@ -1297,14 +1437,12 @@ impl System {
         // clones `eq_store.subst` once), so a fired skip is never invalidated
         // by the pass's own bookkeeping.
         self.bump_subst_stamp();
-        // Reach through the sealed wrapper's private field to the inner `Arc`
-        // (in-module access) for copy-on-write mutation.
-        Arc::make_mut(&mut self.content.eq_store.0)
+        Arc::make_mut(&mut self.content.eq_store)
     }
 
     /// Copy-on-write mutable access to `subterm_store` (see `nodes_mut`).
     #[inline]
-    pub fn subterm_store_mut(&mut self) -> &mut SubtermStore {
+    pub(crate) fn subterm_store_mut(&mut self) -> &mut SubtermStore {
         // Structural content-mutation choke for the subterm store: EVERY
         // subterm mutation (external adds, the conjoin graft, AND
         // `subst_system_once`'s own subterm rewrite) routes through here, so
@@ -1349,10 +1487,10 @@ impl System {
     /// if invalidated (mirrors `bump_cache_lvar`).
     #[inline]
     pub fn bump_node_max_lvar(&self, v: &tamarin_term::lterm::LVar) {
-        if let Some(cur) = self.node_max_cache.get() {
-            if v.idx > cur {
-                self.node_max_cache.set(Some(v.idx));
-            }
+        if let Some(cur) = self.node_max_cache.get()
+            && v.idx > cur
+        {
+            self.node_max_cache.set(Some(v.idx));
         }
     }
 
@@ -1383,70 +1521,64 @@ impl System {
         }
     }
 
-    /// Bump the cache for a newly-added LVar.  No-op if invalidated.
+    /// Shared body of the `bump_cache_*` helpers: bump `content_stamp`, then
+    /// raise the cached max-var idx to whatever `walk` leaves in its
+    /// argument.  No-op on the cache if it is invalidated.
+    ///
+    /// CONTENT-axis choke (additive): these helpers are called on every
+    /// content-growing write (add_node/edge/less/goal, insert_last, ...).
+    /// The stamp bump is UNCONDITIONAL — even when the added value's idx is
+    /// <= the cached max (numeric no-op), the field still grew, so the
+    /// marker must invalidate.
     #[inline]
-    pub fn bump_cache_lvar(&self, v: &tamarin_term::lterm::LVar) {
-        // CONTENT-axis choke (additive): called on every content-growing write
-        // (add_node/edge/less/goal, insert_last, ...).  Bump UNCONDITIONALLY —
-        // even when the new var's idx is <= the cached max (numeric no-op), the
-        // field still grew, so the marker must invalidate.
+    fn bump_cache_with(&self, walk: impl FnOnce(&mut u64)) {
         self.bump_content_stamp();
         if let Some(cur) = self.max_var_idx_cache.get() {
-            if v.idx > cur {
-                self.max_var_idx_cache.set(Some(v.idx));
+            let mut m = cur;
+            walk(&mut m);
+            if m != cur {
+                self.max_var_idx_cache.set(Some(m));
             }
         }
+    }
+
+    /// Bump the cache for a newly-added LVar.
+    #[inline]
+    pub fn bump_cache_lvar(&self, v: &tamarin_term::lterm::LVar) {
+        self.bump_cache_with(|m| {
+            if v.idx > *m {
+                *m = v.idx;
+            }
+        });
     }
 
     /// Bump the cache by walking a term.
     #[inline]
     pub fn bump_cache_term(&self, t: &tamarin_term::lterm::LNTerm) {
-        self.bump_content_stamp();
-        if let Some(cur) = self.max_var_idx_cache.get() {
-            let mut m = cur;
-            crate::constraint::solver::reduction::bm_term_pub(t, &mut m);
-            if m != cur {
-                self.max_var_idx_cache.set(Some(m));
-            }
-        }
+        self.bump_cache_with(|m| crate::constraint::solver::reduction::bm_term_pub(t, m));
     }
 
     /// Bump the cache by walking a fact's terms.
     #[inline]
     pub fn bump_cache_fact(&self, fa: &crate::fact::LNFact) {
-        self.bump_content_stamp();
-        if let Some(cur) = self.max_var_idx_cache.get() {
-            let mut m = cur;
-            crate::constraint::solver::reduction::bm_fact_pub(fa, &mut m);
-            if m != cur {
-                self.max_var_idx_cache.set(Some(m));
-            }
-        }
+        self.bump_cache_with(|m| crate::constraint::solver::reduction::bm_fact_pub(fa, m));
     }
 
     /// Bump the cache by walking a rule's free vars.
     #[inline]
     pub fn bump_cache_rule(&self, r: &crate::rule::RuleACInst) {
-        self.bump_content_stamp();
-        if let Some(cur) = self.max_var_idx_cache.get() {
-            let mut m = cur;
-            crate::constraint::solver::reduction::bm_rule_pub(r, &mut m);
-            if m != cur {
-                self.max_var_idx_cache.set(Some(m));
-            }
-        }
+        self.bump_cache_with(|m| crate::constraint::solver::reduction::bm_rule_pub(r, m));
     }
 
     /// Bump the cache by walking a guarded formula.
     #[inline]
     pub fn bump_cache_guarded(&self, f: &Guarded) {
-        self.bump_content_stamp();
-        if let Some(cur) = self.max_var_idx_cache.get() {
+        self.bump_cache_with(|m| {
             let n = crate::guarded::max_var_idx(f);
-            if n > cur {
-                self.max_var_idx_cache.set(Some(n));
+            if n > *m {
+                *m = n;
             }
-        }
+        });
     }
 
     /// Bump the cache by walking a goal.
@@ -1484,7 +1616,7 @@ impl System {
     /// the insertion still advances `next_goal_nr`, as HS's does.
     pub fn add_goal(&mut self, g: Goal) {
         // HS has a single goal entry point: `insertGoal goal False`
-        // (Reduction.hs:523-524). `add_goal` is exactly that — defer to
+        // (Reduction.hs). `add_goal` is exactly that — defer to
         // `add_goal_with_loop_flag` with `looping = false` so both
         // entry points share one counter-advance / dedup / push path.
         self.add_goal_with_loop_flag(g, false);
@@ -1500,55 +1632,19 @@ impl System {
     /// — so re-inserting a goal that was previously marked `solved` keeps
     /// it solved.
     ///
-    /// The key match is `==` on [`canonical_goal_for_dedup`].  For Disj goals
-    /// that is HS's Map-key match: both sides bind quantified vars by DeBruijn
-    /// index (RS's `BVar::Bound`, guarded_types.rs), so a Disj re-fired across
-    /// proof positions is structurally identical to the stored one and merges
-    /// into it instead of accumulating a second, `solved=false` copy.
+    /// The key match is `==` on the goal itself.  For Disj goals that is HS's
+    /// Map-key match: both sides bind quantified vars by DeBruijn index (RS's
+    /// `BVar::Bound`), so a Disj re-fired across proof
+    /// positions is structurally identical to the stored one and merges into
+    /// it instead of accumulating a second, `solved=false` copy.
     pub fn add_goal_with_loop_flag(&mut self, g: Goal, looping: bool) {
-        // HS `insertGoalStatus` (Reduction.hs:516-521) reads
+        // HS `insertGoalStatus` (Reduction.hs) reads
         // `sNextGoalNr` then `succ`s it on EVERY call, including when
         // the goal key already exists (where `insertWith
         // combineGoalStatus` keeps the existing — smaller — nr).
         let age = self.next_goal_nr;
         self.next_goal_nr = self.next_goal_nr.wrapping_add(1);
-        if dbg_insert_goal() {
-            let in_pre = crate::constraint::solver::sources::in_precompute_mode()
-                || crate::constraint::solver::sources::in_initial_source_cases();
-            let want_pre = dbg_insert_goal_include_precompute();
-            if !in_pre || want_pre {
-                let tag = if in_pre { "<precompute>" } else { "<proof>" };
-                eprintln!(
-                    "[RS_INS_GOAL] lemma={} gsNr={} solved=false loops={} goal={:?}",
-                    tag, age, looping, g
-                );
-            }
-        }
-        // One dedup scan feeds both the trace below and the merge/push
-        // decision.  `canon_g` BORROWS `g` (`Cow::Borrowed`), so the block
-        // scopes its borrow to end before `g` is moved into the goal store.
-        let slot_idx = {
-            let canon_g = canonical_goal_for_dedup(&g);
-            self.goals
-                .iter()
-                .position(|(existing, _)| *canonical_goal_for_dedup(existing) == *canon_g)
-        };
-        if trace_goal_insert() {
-            let kindstr = match &g {
-                Goal::Action(i, fa) => format!("Action {:?} {:?}", i, fa),
-                Goal::Premise(p, fa) => format!("Premise {:?} {:?}", p, fa),
-                Goal::Chain(c, p) => format!("Chain {:?}->{:?}", c, p),
-                Goal::Split(sid) => format!("Split {:?}", sid),
-                Goal::Disj(_) => "Disj".to_string(),
-                Goal::Subterm(_) => "Subterm".to_string(),
-            };
-            eprintln!(
-                "[RS_GOAL_INSERT] gsNr={} isNew={} kind={}",
-                age,
-                slot_idx.is_none(),
-                kindstr
-            );
-        }
+        let slot_idx = self.goals.iter().position(|(existing, _)| *existing == g);
         if let Some(idx) = slot_idx {
             let slot = &mut self.goals_mut()[idx];
             slot.1.looping = slot.1.looping || looping;
@@ -1587,15 +1683,11 @@ impl System {
     }
 
     /// Add an edge if not already present.  Low-level raw insert
-    /// equivalent of HS `modM sEdges (S.insert e)`.  Does NOT emit the
-    /// Rust-only `[EXEC] insertEdges n=K` trace — that is added by
-    /// `Reduction::insert_edge_labeled`, the Rust wrapper around HS's
-    /// `insertEdges` (Reduction.hs:278-281, which runs `solveFactEqs`).
-    /// Callers that mirror HS's `insertEdges` must use
-    /// `Reduction::insert_edge_labeled` (emits the trace + runs
-    /// `solveFactEqs`); callers that mirror HS's raw `modM sEdges`
-    /// (e.g. `exploitPrem InFact` / `exploitPrem FreshFact`) should use
-    /// this directly.
+    /// equivalent of HS `modM sEdges (S.insert e)`.  Callers that mirror
+    /// HS's `insertEdges` (Reduction.hs, which runs
+    /// `solveFactEqs`) must use `Reduction::insert_edge`; callers that
+    /// mirror HS's raw `modM sEdges` (e.g. `exploitPrem InFact` /
+    /// `exploitPrem FreshFact`) should use this directly.
     pub fn add_edge(&mut self, e: Edge) {
         if !self.edges.contains(&e) {
             self.bump_cache_lvar(&e.src.0);
@@ -1614,12 +1706,12 @@ impl System {
     pub fn add_less(&mut self, l: LessAtom) {
         // HS `insertLess` = `modM sLessAtoms (S.insert l)`. `Data.Set.insert`
         // REPLACES an existing equal element with the new one, and
-        // `Eq`/`Ord LessAtom` ignore the reason tag (Constraints.hs:126-130),
+        // `Eq`/`Ord LessAtom` ignore the reason tag (Constraints.hs),
         // so re-inserting the same `(smaller,larger)` with a DIFFERENT reason
         // OVERWRITES the stored reason (last-wins). A first-occurrence-wins
         // dedup would keep the wrong reason — e.g. a GenKey→Alice ordering
         // added first by fresh-uniqueness (`Fresh`) then by injective-fact
-        // monotonicity (`InjectiveFacts`, Simplify.hs:589 in `simpInjectiveFactEqMon`) must end up
+        // monotonicity (`InjectiveFacts`, Simplify.hs in `simpInjectiveFactEqMon`) must end up
         // `InjectiveFacts`, driving the less-edge's graph colour. The reason
         // is metadata for rendering only (read solely by `Dot.hs`/graph
         // simplification); replace in place to preserve iteration order.
@@ -1699,8 +1791,8 @@ impl System {
     /// relation depends only on `&self`, never on the `i`/`j` query
     /// arguments.
     pub fn build_always_before_adj(&self) -> PrebuiltAdj {
-        let mut adj: std::collections::BTreeMap<NodeId, Vec<NodeId>> =
-            std::collections::BTreeMap::new();
+        let mut adj: tamarin_utils::FastMap<NodeId, Vec<NodeId>> =
+            tamarin_utils::FastMap::default();
         for l in &self.less_atoms {
             adj.entry(l.smaller).or_default().push(l.larger);
         }
@@ -1709,13 +1801,8 @@ impl System {
         }
         // HS-faithful `unsolvedChains` contribution to rawEdgeRel
         // (`System.hs`).
-        for (g, st) in self.goals.iter() {
-            if st.solved {
-                continue;
-            }
-            if let crate::constraint::constraints::Goal::Chain(c, p) = g {
-                adj.entry(c.0).or_default().push(p.0);
-            }
+        for (c, p) in self.unsolved_chains() {
+            adj.entry(c.0).or_default().push(p.0);
         }
         PrebuiltAdj { adj }
     }
@@ -1727,7 +1814,7 @@ impl System {
     pub fn always_before_with(&self, adj: &PrebuiltAdj, i: &NodeId, j: &NodeId) -> bool {
         // DELIBERATE deviation from HS `alwaysBefore`: HS's
         // `reachableSet [i] lessRel` seeds the visited set with `i`
-        // itself (Data/DAG/Simple.hs:76-79), so `alwaysBefore sys i i`
+        // itself (Data/DAG/Simple.hs), so `alwaysBefore sys i i`
         // is `True`.  We short-circuit `i == j` to `false`.  This is
         // caller-safe: every live caller already filters equal nodes
         // before reaching here (Less/EqE simplify guards, the
@@ -1740,7 +1827,7 @@ impl System {
         let adj = &adj.adj;
         // BFS from i until j.
         let mut frontier: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
-        let mut visited: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
+        let mut visited = tamarin_utils::FastSet::default();
         frontier.push_back(*i);
         visited.insert(*i);
         while let Some(n) = frontier.pop_front() {
@@ -1760,43 +1847,44 @@ impl System {
 
     /// `insertLemma`: flatten a top-level `Conj` into individual lemma
     /// entries. Mirrors the Haskell `insertLemma` recursion.
-    pub fn insert_lemma(&mut self, l: Guarded) {
-        match l {
+    pub fn insert_lemma(&mut self, l: impl Into<Arc<Guarded>>) {
+        let l = l.into();
+        match l.as_ref() {
             Guarded::Conj(items) => {
                 for item in items.iter() {
                     self.insert_lemma(item.clone());
                 }
             }
-            other => {
-                if !crate::guarded::stores_contains(&self.lemmas, &other) {
-                    self.bump_cache_guarded(&other);
-                    self.content.lemmas.push(Arc::new(other));
+            _ => {
+                if !crate::guarded::stores_contains(&self.lemmas, &l) {
+                    self.bump_cache_guarded(&l);
+                    self.content.lemmas.push(l);
                 }
             }
         }
     }
 
-    pub fn insert_lemmas(&mut self, ls: Vec<Guarded>) {
+    pub fn insert_lemmas<T: Into<Arc<Guarded>>>(&mut self, ls: impl IntoIterator<Item = T>) {
         for l in ls {
             self.insert_lemma(l);
         }
     }
 
-    /// Direct port of Haskell `isInitialSystem` (`System.hs:828-830`):
+    /// Direct port of Haskell `isInitialSystem` (`System.hs`):
     ///   isInitialSystem sys =
     ///     null (get sSolvedFormulas sys) && not (member bot (get sFormulas sys))
     /// where `bot = gfalse()`.  Two conditions: no solved formulas yet, and no
     /// gfalse in the formula set.  This is the gate the automatic-search path
-    /// (`rankProofMethods`, ProofMethod.hs:520-548, see line 527) uses to decide whether
+    /// (`rankProofMethods`, ProofMethod.hs) uses to decide whether
     /// `insertInduction` runs — NOT the stricter replay-only `canApplyInduction`
-    /// (ProofMethod.hs:264-270), which additionally checks node/goal emptiness
+    /// (ProofMethod.hs), which additionally checks node/goal emptiness
     /// and omits the gfalse check.
     pub fn is_initial(&self) -> bool {
         self.solved_formulas.is_empty()
             && !crate::guarded::stores_contains(&self.formulas, &crate::guarded::gfalse())
     }
 
-    /// Port of Haskell's `cleanup` (`ProofMethod.hs:310-311`):
+    /// Port of Haskell's `cleanup` (`ProofMethod.hs`):
     ///
     /// Resets the system's variable indices and clears the substitution.
     pub fn cleanup(mut self) -> Self {
@@ -1810,6 +1898,87 @@ impl System {
         // the pre-clear max (stale-high ⇒ fresh idxs minted above HS's).
         // Invalidate so the next `bounds_max` recomputes post-clear.
         self.invalidate_max_var_idx_cache();
+        self
+    }
+}
+
+// =============================================================================
+// HasFrees
+// =============================================================================
+
+/// `instance HasFrees GoalStatus` (System.hs): a goal status holds
+/// no variable, so it folds to nothing and maps to itself.  The `sGoals` walk
+/// reaches it through the pair instance (LTerm.hs), which is how HS's
+/// `M.Map Goal GoalStatus` instance combines a key with its value
+/// (LTerm.hs).
+impl HasFrees for GoalStatus {
+    fn for_each_free(&self, _f: &mut dyn FnMut(&LVar)) {}
+
+    fn map_free_with(self, _f: &mut dyn FnMut(LVar) -> LVar, _monotone: bool) -> Self {
+        self
+    }
+}
+
+/// `instance HasFrees System` (System.hs).
+///
+/// The fold visits the thirteen fields of the Haskell record in declaration
+/// order (System.hs); the last three — `sNextGoalNr`, `sSourceKind`
+/// and `sDiffSystem` — hold no variable.
+///
+/// The map rebuilds each `Vec`-backed field in its own STORAGE order, where
+/// HS re-establishes the container with `S.fromList` / `M.fromList`
+/// (LTerm.hs, LTerm.hs).  The port's insertion order is what the
+/// solver and the printer read back — `conjoin_system` appends to `formulas`,
+/// goal numbers follow the `goals` positions — so a re-sort here would move
+/// them.  A caller that wants the Haskell rebuild performs it itself, as
+/// `rename_precise_system` does.
+///
+/// `side` has no counterpart in the non-diff Haskell system and is carried
+/// over untouched.
+///
+/// The epilogue owns the derived state the rewritten fields invalidate: both
+/// max-var-idx caches (the map may LOWER a maximum) and every stamp, since a
+/// whole-system rewrite can inherit no verified-no-op verdict.  The equation
+/// store is rebuilt through `take_eq_store` / `set_eq_store`, the sanctioned
+/// write path for that field.
+impl HasFrees for System {
+    fn for_each_free(&self, f: &mut dyn FnMut(&LVar)) {
+        self.for_each_free_with_node_boundary(f, |f, v| f(v), |_| {});
+    }
+
+    fn map_free_with(mut self, f: &mut dyn FnMut(LVar) -> LVar, monotone: bool) -> Self {
+        let nodes = Arc::unwrap_or_clone(std::mem::take(&mut self.content.nodes));
+        self.content.nodes = Arc::new(
+            nodes
+                .into_iter()
+                .map(|(id, rule)| {
+                    (
+                        id.map_free_with(&mut *f, monotone),
+                        rule.map_free_with(&mut *f, monotone),
+                    )
+                })
+                .collect(),
+        );
+        self.content.edges =
+            std::mem::take(&mut self.content.edges).map_free_with(&mut *f, monotone);
+        self.content.less_atoms =
+            std::mem::take(&mut self.content.less_atoms).map_free_with(&mut *f, monotone);
+        self.content.last_atom = self.content.last_atom.map_free_with(&mut *f, monotone);
+        let subterm_store = Arc::unwrap_or_clone(std::mem::take(&mut self.content.subterm_store));
+        self.content.subterm_store = Arc::new(subterm_store.map_free_with(&mut *f, monotone));
+        let eq_store = Arc::unwrap_or_clone(self.take_eq_store());
+        self.set_eq_store(Arc::new(eq_store.map_free_with(&mut *f, monotone)));
+        self.content.formulas =
+            std::mem::take(&mut self.content.formulas).map_free_with(&mut *f, monotone);
+        self.content.solved_formulas =
+            std::mem::take(&mut self.content.solved_formulas).map_free_with(&mut *f, monotone);
+        self.content.lemmas =
+            std::mem::take(&mut self.content.lemmas).map_free_with(&mut *f, monotone);
+        let goals = Arc::unwrap_or_clone(std::mem::take(&mut self.content.goals));
+        self.content.goals = Arc::new(goals.map_free_with(&mut *f, monotone));
+        self.invalidate_node_max_cache();
+        self.invalidate_max_var_idx_cache();
+        self.mint_fresh_stamps();
         self
     }
 }
@@ -1829,26 +1998,30 @@ impl System {
 pub fn formula_to_system(
     restrictions: Vec<Guarded>,
     source_kind: SourceKind,
-    trace_quantifier: tamarin_parser::ast::TraceQuantifier,
-    is_diff: bool,
+    trace_quantifier: crate::theory::TraceQuantifier,
     fm: &Guarded,
 ) -> System {
-    use crate::guarded::{gconj, gnot, is_safety_formula};
-    use tamarin_parser::ast::TraceQuantifier;
+    let (safety, other): (Vec<_>, Vec<_>) = restrictions
+        .into_iter()
+        .map(Arc::new)
+        .partition(|restriction| crate::guarded::is_safety_formula(restriction));
+    formula_to_system_partitioned(&safety, &other, source_kind, trace_quantifier, fm)
+}
+
+/// [`formula_to_system`] for contexts that have already partitioned their
+/// immutable restrictions once.
+pub fn formula_to_system_partitioned(
+    safety_restrictions: &[Arc<Guarded>],
+    other_restrictions: &[Arc<Guarded>],
+    source_kind: SourceKind,
+    trace_quantifier: crate::theory::TraceQuantifier,
+    fm: &Guarded,
+) -> System {
+    use crate::guarded::{gconj, gnot};
+    use crate::theory::TraceQuantifier;
 
     let mut sys = System::empty();
     sys.source_kind = Some(source_kind);
-    // HS stores `_sDiffSystem = isdiff` on its `System` record
-    // (System.hs:821-824/396).  The Rust `System` has no such field —
-    // `side` encodes LHS/RHS, not diff — so diff-mode is carried on
-    // `ProofContext.is_diff` (context.rs) instead.  Nothing about
-    // `is_diff` is recorded on the System here.
-    let _ = is_diff;
-
-    // Partition restrictions into safety / non-safety.
-    let (safety, other_restrictions): (Vec<Guarded>, Vec<Guarded>) =
-        restrictions.into_iter().partition(is_safety_formula);
-
     // Negate AllTraces lemmas; keep ExistsTrace as-is.
     let gf1 = match trace_quantifier {
         TraceQuantifier::ExistsTrace => fm.clone(),
@@ -1856,35 +2029,36 @@ pub fn formula_to_system(
     };
     // Conjoin non-safety restrictions.
     let mut conj_items = vec![gf1];
-    conj_items.extend(other_restrictions);
+    conj_items.extend(
+        other_restrictions
+            .iter()
+            .map(|restriction| (**restriction).clone()),
+    );
     let gf2 = gconj(conj_items);
-    sys.formulas_mut().push(Arc::new(gf2));
+    sys.insert_formula(gf2);
     // Safety restrictions are added as known-true lemmas.
-    sys.insert_lemmas(safety);
+    sys.insert_lemmas(safety_restrictions.iter().cloned());
     sys
 }
 
-/// Serde for `System` (the RL server's system codec): it writes its six value
+/// Serde for `System` (the RL server's system codec): it writes its four value
 /// fields and none of the caches/stamps, the same split
 /// `impl PartialEq for System` makes.  Reading takes the caches and fresh
 /// stamps from `System::empty`, so `decode(encode(sys)) == sys`.  Writing
 /// destructures every field, so a new field is a compile error here.
 #[cfg(feature = "serde")]
 mod serde_impl {
-    use super::{Guarded, System, SystemContent};
+    use super::{Side, SourceKind, System, SystemContent};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::sync::Arc;
 
-    /// The written fields of `System`, generic over the three non-`Copy` ones
-    /// so writing borrows and reading owns.
+    /// The written fields of `System`, generic over the non-`Copy` one so
+    /// writing borrows and reading owns.
     #[derive(Serialize, Deserialize)]
-    struct SystemWire<C, U, L> {
+    struct SystemWire<C> {
         content: C,
-        source_kind: Option<super::SourceKind>,
-        side: Option<super::Side>,
+        source_kind: Option<SourceKind>,
+        side: Option<Side>,
         next_goal_nr: u64,
-        used_sources: U,
-        sources_lemma_universals: L,
     }
 
     impl Serialize for System {
@@ -1894,8 +2068,6 @@ mod serde_impl {
                 source_kind,
                 side,
                 next_goal_nr,
-                used_sources,
-                sources_lemma_universals,
                 // Caches and stamps: not part of the value (see
                 // `impl PartialEq for System`), rebuilt on read.
                 max_var_idx_cache: _,
@@ -1913,8 +2085,6 @@ mod serde_impl {
                 source_kind: *source_kind,
                 side: *side,
                 next_goal_nr: *next_goal_nr,
-                used_sources,
-                sources_lemma_universals,
             }
             .serialize(s)
         }
@@ -1927,16 +2097,12 @@ mod serde_impl {
                 source_kind,
                 side,
                 next_goal_nr,
-                used_sources,
-                sources_lemma_universals,
-            } = SystemWire::<SystemContent, Vec<String>, Vec<Arc<Guarded>>>::deserialize(d)?;
+            } = SystemWire::<SystemContent>::deserialize(d)?;
             Ok(System {
                 content,
                 source_kind,
                 side,
                 next_goal_nr,
-                used_sources,
-                sources_lemma_universals,
                 ..System::empty()
             })
         }
